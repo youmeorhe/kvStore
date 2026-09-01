@@ -1,177 +1,237 @@
-//! 服务器入口（成员 C 负责实现）
-//! 用法：
-//!   cargo run --bin server
-//!   cargo run --bin server -- --port 6380 --data ./my.db
-//!   cargo run --bin server -- --help
-
-#![allow(unused, dead_code)] // C 填代码阶段允许未使用的导入
-
-use kvstore::{protocol, KvError, Result, SharedKvStore};
-use std::io::{BufRead, BufReader, Write};
+use std::env;
 use std::net::{TcpListener, TcpStream};
+use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
-use std::sync::Arc;
+use std::thread;
 
-// =====================================================================
-// A 实现完 KvStore 后，C 取消下面这行的注释；在自测阶段先写 DummyKv
-// use kvstore::storage::KvStore;
-// =====================================================================
+// ----- 依赖成员B的协议模块（必须存在） -----
+use kvstore::protocol;
+use kvstore::error::{KvError, Result};
 
-fn main() {
-    if let Err(e) = run() {
-        eprintln!("(fatal) {e}");
-        std::process::exit(1);
-    }
-}
-
-fn run() -> Result<()> {
-    // TODO(C)：第一步，解析 args（极简手写，不用 clap）
-    // - --port N     → 端口，默认 6379
-    // - --data PATH  → 数据文件路径，默认 "./kv.db"
-    // - --help / -h  → 打印用法 return Ok(())
-    let port: u16 = 6379;          // TODO(C): 从 args 读
-    let data_path: String = "./kv.db".into();  // TODO(C): 从 args 读
-    print_usage_if_help();                   // TODO(C): 如果有 --help 先打印再 return
-
-    // TODO(C)：第二步，打开存储：
-    //     A 好之后：
-    //         let kv: SharedKvStore = Arc::new(std::sync::Mutex::new(KvStore::open(&data_path)?));
-    //     A 没好之前自测：用文件底部的 DummyKv
-    //         let kv: Arc<std::sync::Mutex<DummyKv>> = Arc::new(std::sync::Mutex::new(DummyKv::open(&data_path)?));
-    //         然后把 dispatch 里的类型改一下也能跑
-    let _ = (port, data_path); // 占位，C 删
-    todo!("server run() —— 成员 C 实现。步骤参考任务分工.md C 章节 & 本文件顶部注释");
-
-    /* TODO(C)：第三步，主线程 accept 循环骨架，直接抄这段：
-
-    let clients = Arc::new(AtomicUsize::new(0));
-    let listener = TcpListener::bind(format!("0.0.0.0:{port}"))?;
-    {
-        let g = kv.lock().unwrap();
-        println!("===== KV Store Server =====");
-        println!("监听地址:  0.0.0.0:{port}");
-        println!("数据文件:  {data_path}");
-        println!("数据条数:  {}", g.len());
-        println!("按 Ctrl+C 停止服务");
-    }
-
-    for stream in listener.incoming() {
-        match stream {
-            Ok(s) => {
-                let kv = Arc::clone(&kv);
-                let c = Arc::clone(&clients);
-                c.fetch_add(1, SeqCst);
-                std::thread::spawn(move || {
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let _ = handle_client(s, kv, c.clone());
-                    }));
-                    c.fetch_sub(1, SeqCst);
-                });
-            }
-            Err(e) => eprintln!("(warn) accept 失败: {e}"),
-        }
-    }
-    Ok(())
-    */
-}
-
-// —— 帮助（C 填） ——
-fn print_usage_if_help() {
-    // 扫 args().any(|a| a == "--help" || a == "-h") 打印：
-    //   用法：server [--port N] [--data PATH]
-    //     --port N      监听端口，默认 6379
-    //     --data PATH   持久化数据文件路径，默认 ./kv.db
-    //     --help, -h    打印本帮助
-}
-
-// —— 单连接处理循环（C 填） ——
-#[allow(dead_code)]
-fn handle_client(stream: TcpStream, kv: SharedKvStore, clients: Arc<AtomicUsize>) -> Result<()> {
-    // let mut reader = BufReader::new(stream.try_clone()?);
-    // let mut writer = stream;
-    // let mut line = String::new();
-    // loop {
-    //     line.clear();
-    //     match reader.read_line(&mut line) {
-    //         Ok(0) => break,  // EOF：客户端关了
-    //         Ok(_) => {}
-    //         Err(_) => break,
-    //     }
-    //     let trimmed = line.trim_end_matches(&['\n','\r'][..]);
-    //     let is_quit = protocol::parse_command(trimmed)
-    //         .map(|(c,_)| c == "quit")
-    //         .unwrap_or(false);
-    //     let resp = match dispatch(trimmed, &kv, &clients) {
-    //         Ok(r) => r,
-    //         Err(KvError(e)) => protocol::resp_err(&e),
-    //     };
-    //     // 发送：单个命令 write 失败就断连，不影响 server 主循环
-    //     if writer.write_all(resp.as_bytes()).is_err() { break; }
-    //     let _ = writer.flush();
-    //     if is_quit { break; }
-    // }
-    let _ = (stream, kv, clients);
-    unimplemented!("handle_client —— C 实现")
-}
-
-// —— 单条命令分发，返回一行响应字符串（C 填） ——
-#[allow(dead_code)]
-fn dispatch(line: &str, kv: &SharedKvStore, clients: &Arc<AtomicUsize>) -> std::result::Result<String, KvError> {
-    // let (cmd, args) = protocol::parse_command(line)
-    //     .map_err(KvError)?;
-    // match cmd {
-    //     "set" => {
-    //         let key = args[0].to_string();
-    //         let value = args[1..].join(" ");          // 多词拼接 value
-    //         kv.lock().unwrap().set(key, value)?;      // 🔴 锁只在这一行持有
-    //         Ok(protocol::resp_ok(None))
-    //     }
-    //     "get" => {
-    //         let v = kv.lock().unwrap().get(args[0]);  // 🔴 锁立即释放
-    //         Ok(match v.as_deref() {
-    //             Some(s) => protocol::resp_ok(Some(s)),
-    //             None    => protocol::resp_notfound(),
-    //         })
-    //     }
-    //     "del" => {
-    //         let existed = kv.lock().unwrap().del(args[0])?;
-    //         Ok(if existed { protocol::resp_ok(None) } else { protocol::resp_notfound() })
-    //     }
-    //     "keys" => {
-    //         let list = kv.lock().unwrap().keys();
-    //         Ok(protocol::resp_keys(&list))
-    //     }
-    //     "status" => {
-    //         let n = kv.lock().unwrap().len();
-    //         let c = clients.load(SeqCst);
-    //         Ok(protocol::resp_status(n, c))
-    //     }
-    //     "ping" => Ok(protocol::resp_pong()),
-    //     "quit" => Ok(protocol::resp_ok(Some("再见"))),
-    //     _    => unreachable!(),
-    // }
-    let _ = (line, kv, clients);
-    unimplemented!("dispatch —— C 实现，范式写在上面注释里")
-}
-
-// =====================================================================
-// 临时占位：A 的 KvStore 没好之前，C 用这个自测网络/并发功能。
-// A 代码合并 main 那天，C 全局搜索替换：DummyKv → KvStore
-// =====================================================================
-#[allow(dead_code)]
+// ----- 占位结构（成员A完成前使用） -----
+// 替换说明：当 storage::KvStore 完成后，删除此结构，
+// 并将下面的 type SharedKvStore 改为 Arc<Mutex<storage::KvStore>>。
+#[derive(Default)]
 pub struct DummyKv;
 
-#[allow(dead_code)]
 impl DummyKv {
-    pub fn open(_path: &str) -> Result<Self> { Ok(Self) }
-    pub fn set(&self, _k: String, _v: String) -> Result<()> { Ok(()) }
-    pub fn del(&self, _k: &str) -> Result<bool> { Ok(true) }
-    pub fn get(&self, k: &str) -> Option<String> { Some(format!("dummy_{k}")) }
-    pub fn keys(&self) -> Vec<String> { vec!["a".into(), "b".into(), "c".into()] }
-    pub fn len(&self) -> usize { 3 }
-    pub fn is_empty(&self) -> bool { false }
+    pub fn open(_path: &str) -> Result<Self> {
+        Ok(DummyKv)
+    }
+
+    pub fn set(&self, _key: String, _value: String) -> Result<()> {
+        Ok(())
+    }
+
+    pub fn del(&self, _key: &str) -> Result<bool> {
+        Ok(true)
+    }
+
+    pub fn get(&self, key: &str) -> Option<String> {
+        Some(format!("dummy_{}", key))
+    }
+
+    pub fn keys(&self) -> Vec<String> {
+        vec!["a".to_string(), "b".to_string()]
+    }
+
+    pub fn len(&self) -> usize {
+        2
+    }
 }
 
-// C 自测时在 run() 里先用：
-//     let kv: Arc<Mutex<DummyKv>> = Arc::new(Mutex::new(DummyKv::open(&data_path)?));
-// 并且把 handle_client / dispatch 的参数类型改成对应类型（A 好后再统一切回 SharedKvStore）
+// ----- 对外类型（便于切换真实存储） -----
+type SharedKvStore = Arc<Mutex<DummyKv>>;
+// 成员A完成后替换为：
+// use kvstore::storage::KvStore;
+// type SharedKvStore = Arc<Mutex<KvStore>>;
+
+// ----- 主函数 -----
+fn main() -> Result<()> {
+    let (port, data_path) = parse_args()?;
+
+    // 打开存储（此处使用DummyKv，A完成后需替换为 KvStore::open）
+    let kv = Arc::new(Mutex::new(DummyKv::open(&data_path)?));
+    // 替换后为：
+    // let kv = Arc::new(Mutex::new(KvStore::open(&data_path)?));
+
+    let clients = Arc::new(AtomicUsize::new(0));
+
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", port))?;
+    println!(
+        "===== KV Store Server =====\n\
+         监听地址:  0.0.0.0:{}\n\
+         数据文件:  {}\n\
+         数据条数:  {}\n\
+         按 Ctrl+C 停止服务",
+        port,
+        data_path,
+        kv.lock().unwrap_or_else(|p| p.into_inner()).len()
+    );
+
+    // 接受连接循环
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                let kv = Arc::clone(&kv);
+                let clients = Arc::clone(&clients);
+                clients.fetch_add(1, SeqCst);
+
+                thread::spawn(move || {
+                    // 捕获 panic，单个连接崩溃不影响服务
+                    // 注意：闭包会 move 变量，所以给闭包克隆一份 clients
+                    let clients_inner = Arc::clone(&clients);
+                    let _ = std::panic::catch_unwind(move || {
+                        handle_client(stream, kv, clients_inner);
+                    });
+                    // 客户端线程结束，减少计数
+                    clients.fetch_sub(1, SeqCst);
+                });
+            }
+            Err(e) => eprintln!("(warn) accept 失败: {}", e),
+        }
+    }
+
+    Ok(())
+}
+
+// ----- 解析命令行参数 -----
+fn parse_args() -> Result<(u16, String)> {
+    let args: Vec<String> = env::args().collect();
+    let mut port = 6379;
+    let mut data_path = "./kv.db".to_string();
+
+    let mut iter = args.iter().skip(1);
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--port" => {
+                if let Some(p) = iter.next() {
+                    port = p.parse().map_err(|_| KvError("无效端口".into()))?;
+                } else {
+                    return Err(KvError("--port 需要参数".into()));
+                }
+            }
+            "--data" => {
+                if let Some(p) = iter.next() {
+                    data_path = p.clone();
+                } else {
+                    return Err(KvError("--data 需要参数".into()));
+                }
+            }
+            "--help" | "-h" => {
+                println!(
+                    "用法: {} [--port PORT] [--data DATA_PATH]\n\
+                     默认端口: 6379\n\
+                     默认数据文件: ./kv.db",
+                    args[0]
+                );
+                std::process::exit(0);
+            }
+            _ => {
+                return Err(KvError(format!("未知参数: {}, 使用 --help 查看用法", arg).into()));
+            }
+        }
+    }
+
+    Ok((port, data_path))
+}
+
+// ----- 处理单个客户端连接 -----
+fn handle_client(stream: TcpStream, kv: SharedKvStore, clients: Arc<AtomicUsize>) {
+    // std 的 TcpStream 没有 split()（那是 tokio 的 API），
+    // 拆分读写用 try_clone()：reader 拿一份克隆，writer 直接用本体
+    let reader = match stream.try_clone() {
+        Ok(r) => BufReader::new(r),
+        Err(_) => return, // 克隆失败，放弃此连接
+    };
+    let mut reader = reader;
+    let mut writer = BufWriter::new(stream);
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break, // 客户端关闭
+            Ok(_) => {
+                // 去除结尾换行符
+                let cmd_line = line.trim_end_matches('\n').trim_end_matches('\r');
+                if cmd_line.is_empty() {
+                    continue;
+                }
+
+                // 分发命令，获得响应
+                let resp = match dispatch(cmd_line, &kv, &clients) {
+                    Ok(r) => r,
+                    Err(e) => protocol::resp_err(&e), // 协议层错误格式化
+                };
+
+                // 发送响应
+                if writer.write_all(resp.as_bytes()).is_err() {
+                    break; // 写入失败，断开连接
+                }
+                if writer.flush().is_err() {
+                    break;
+                }
+
+                // quit 命令断开连接
+                if cmd_line.trim().eq_ignore_ascii_case("quit") {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+// ----- 命令分发函数（返回响应字符串） -----
+fn dispatch(
+    line: &str,
+    kv: &SharedKvStore,
+    clients: &Arc<AtomicUsize>,
+) -> std::result::Result<String, String> {
+    let (cmd, args) = protocol::parse_command(line)?;
+
+    match cmd {
+        "set" => {
+            let key = args[0].to_string();
+            let value = args[1..].join(" ");
+            kv.lock()
+                .unwrap_or_else(|p| p.into_inner()) // 锁中毒恢复：不因一次 panic 全服瘫痪
+                .set(key, value)
+                .map_err(|e| e.to_string())?;
+            Ok(protocol::resp_ok(None))
+        }
+        "get" => {
+            let value = kv.lock().unwrap_or_else(|p| p.into_inner()).get(args[0]);
+            match value {
+                Some(v) => Ok(protocol::resp_ok(Some(&v))),
+                None => Ok(protocol::resp_notfound()),
+            }
+        }
+        "del" => {
+            let existed = kv.lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .del(args[0])
+                .map_err(|e| e.to_string())?;
+            if existed {
+                Ok(protocol::resp_ok(None))
+            } else {
+                Ok(protocol::resp_notfound())
+            }
+        }
+        "keys" => {
+            let keys = kv.lock().unwrap_or_else(|p| p.into_inner()).keys();
+            Ok(protocol::resp_keys(&keys))
+        }
+        "status" => {
+            let n = kv.lock().unwrap_or_else(|p| p.into_inner()).len();
+            let c = clients.load(SeqCst);
+            Ok(protocol::resp_status(n, c))
+        }
+        "ping" => Ok(protocol::resp_pong()),
+        "quit" => Ok(protocol::resp_ok(Some("再见"))),
+        // parse_command 理论上已过滤未知命令，这里兜底防御
+        _ => Err(format!("未知命令: {}", cmd)),
+    }
+}
