@@ -1,60 +1,25 @@
 use std::env;
-use std::net::{TcpListener, TcpStream};
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::sync::{Arc, Mutex};
+use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 // ----- 依赖成员B的协议模块（必须存在） -----
 use kvstore::protocol;
+// ----- 成员A的真实存储 -----
 use anyhow::{anyhow, Result};
+use kvstore::storage::KvStore;
 
-// ----- 占位结构（成员A完成前使用） -----
-// 替换说明：当 storage::KvStore 完成后，删除此结构，
-// 并将下面的 type SharedKvStore 改为 Arc<Mutex<storage::KvStore>>。
-#[derive(Default)]
-pub struct DummyKv;
-
-impl DummyKv {
-    pub fn open(_path: &str) -> Result<Self> {
-        Ok(DummyKv)
-    }
-
-    pub fn set(&self, _key: String, _value: String) -> Result<()> {
-        Ok(())
-    }
-
-    pub fn del(&self, _key: &str) -> Result<bool> {
-        Ok(true)
-    }
-
-    pub fn get(&self, key: &str) -> Option<String> {
-        Some(format!("dummy_{}", key))
-    }
-
-    pub fn keys(&self) -> Vec<String> {
-        vec!["a".to_string(), "b".to_string()]
-    }
-
-    pub fn len(&self) -> usize {
-        2
-    }
-}
-
-// ----- 对外类型（便于切换真实存储） -----
-type SharedKvStore = Arc<Mutex<DummyKv>>;
-// 成员A完成后替换为：
-// use kvstore::storage::KvStore;
-// type SharedKvStore = Arc<Mutex<KvStore>>;
+// ----- 线程安全的共享存储句柄 -----
+type SharedKvStore = Arc<Mutex<KvStore>>;
 
 // ----- 主函数 -----
 fn main() -> Result<()> {
     let (port, data_path) = parse_args()?;
 
-    // 打开存储（此处使用DummyKv，A完成后需替换为 KvStore::open）
-    let kv = Arc::new(Mutex::new(DummyKv::open(&data_path)?));
-    // 替换后为：
-    // let kv = Arc::new(Mutex::new(KvStore::open(&data_path)?));
+    // 打开存储：文件存在则重放日志恢复，不存在则新建空库
+    let kv = Arc::new(Mutex::new(KvStore::open(&data_path)?));
 
     let clients = Arc::new(AtomicUsize::new(0));
 
@@ -210,7 +175,8 @@ fn dispatch(
             }
         }
         "del" => {
-            let existed = kv.lock()
+            let existed = kv
+                .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .del(args[0])
                 .map_err(|e| e.to_string())?;

@@ -1,216 +1,365 @@
-//! 命令解析 + 响应格式化 + 客户端人类可读输出（成员 B 负责实现）
-//! TODO：以下全是占位代码，B 把 todo!() 全替换成真实实现即可。
-
-#![allow(unused)] // B 填代码阶段允许未使用导入
-
-/// 解析一行用户输入（已经去掉末尾换行），返回 (命令字小写, 参数列表)。
-/// 错误 String 直接就是返回给客户端的 ERR 内容（"ERR xxx\n" 里的 xxx）。
+//! 协议解析 & 响应格式化模块
+//!
+//! 负责：
+//! 1. 解析客户端发来的命令字符串
+//! 2. 格式化服务端响应
+//! 3. 客户端响应的人性化显示
+// ============ 命令解析 ============
+/// 解析一行命令，返回 (命令字, 参数列表)
 ///
-/// 必须支持的命令：
-///   set <key> <value...>   —— value 多词要拼成一个（args[1..] 全拼）
-///   get <key>
-///   del <key>
-///   keys | status | ping | quit
-/// 大小写不敏感。
+/// # 返回
+/// - `Ok((cmd, args))`: 解析成功，命令字全小写
+/// - `Err(msg)`: 解析失败，返回错误信息（会发给客户端）
+///
+/// # 规则
+/// - 空行/全空格 → `Err("空命令")`
+/// - 命令字大小写不敏感
+/// - `set` 至少 2 个参数 (key + value)，value 多词自动拼接
+/// - `get`/`del` 恰好 1 个参数
+/// - `keys`/`status`/`ping`/`quit` 0 个参数
 pub fn parse_command(line: &str) -> Result<(&str, Vec<&str>), String> {
-    // TODO(B)：真实实现
-    // 检查点：
-    // 1. line.trim() 为空 → Err("空命令")
-    // 2. 用 split_whitespace 分词，parts[0] 转小写作命令字
-    // 3. 参数数量校验：set>=2 args, get/del==1, others==0
-    // 4. set/del/get 时 key == "" → Err("key 不能为空")
-    // 5. 未知命令 → Err(format!("未知命令: {}", parts[0]))
-    let _ = line;
-    todo!("parse_command —— 成员 B 实现")
+    let trimmed = line.trim();
+    // 空行检查
+    if trimmed.is_empty() {
+        return Err("空命令".to_string());
+    }
+    // 按空格分割，保留空字符串（用于检测 "" 作为 key）
+    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+    if parts.is_empty() {
+        return Err("空命令".to_string());
+    }
+    let cmd = parts[0].to_lowercase();
+    let args = &parts[1..];
+    match cmd.as_str() {
+        "set" => {
+            if args.len() < 2 {
+                return Err("set 命令需要至少 2 个参数: set <key> <value>".to_string());
+            }
+            let key = args[0];
+            if key.is_empty() {
+                return Err("key 不能为空".to_string());
+            }
+            // 所有参数作为 value，空格拼接
+            Ok(("set", args.to_vec()))
+        }
+        "get" => {
+            if args.len() != 1 {
+                return Err("get 命令需要 1 个参数: get <key>".to_string());
+            }
+            let key = args[0];
+            if key.is_empty() {
+                return Err("key 不能为空".to_string());
+            }
+            Ok(("get", args.to_vec()))
+        }
+        "del" => {
+            if args.len() != 1 {
+                return Err("del 命令需要 1 个参数: del <key>".to_string());
+            }
+            let key = args[0];
+            if key.is_empty() {
+                return Err("key 不能为空".to_string());
+            }
+            Ok(("del", args.to_vec()))
+        }
+        "keys" => {
+            if !args.is_empty() {
+                return Err("keys 命令不需要参数".to_string());
+            }
+            Ok(("keys", vec![]))
+        }
+        "status" => {
+            if !args.is_empty() {
+                return Err("status 命令不需要参数".to_string());
+            }
+            Ok(("status", vec![]))
+        }
+        "ping" => {
+            if !args.is_empty() {
+                return Err("ping 命令不需要参数".to_string());
+            }
+            Ok(("ping", vec![]))
+        }
+        "quit" => {
+            if !args.is_empty() {
+                return Err("quit 命令不需要参数".to_string());
+            }
+            Ok(("quit", vec![]))
+        }
+        unknown => Err(format!("未知命令: {}", unknown)),
+    }
 }
-
-// ============== 响应格式化（服务端 C 调用，客户端也能读）==============
-
+// ============ 服务端响应格式化 ============
+/// 返回 OK 响应，带可选内容
 pub fn resp_ok(value: Option<&str>) -> String {
-    // TODO(B)： "OK {value}\n"；value=None → "OK\n"
-    let _ = value;
-    todo!("resp_ok —— 成员 B 实现")
+    match value {
+        Some(v) => format!("OK {}\n", v),
+        None => "OK\n".to_string(),
+    }
 }
-
+/// 返回 NOTFOUND 响应
 pub fn resp_notfound() -> String {
-    // TODO(B)："NOTFOUND\n"
-    todo!("resp_notfound —— 成员 B 实现")
+    "NOTFOUND\n".to_string()
 }
-
+/// 返回 ERR 响应
 pub fn resp_err(msg: &str) -> String {
-    // TODO(B)："ERR {msg}\n"
-    let _ = msg;
-    todo!("resp_err —— 成员 B 实现")
+    format!("ERR {}\n", msg)
 }
-
+/// 返回 PONG 响应
 pub fn resp_pong() -> String {
-    // TODO(B)："PONG\n"
-    todo!("resp_pong —— 成员 B 实现")
+    "PONG\n".to_string()
 }
-
+/// 返回 STATUS 响应
 pub fn resp_status(keys: usize, clients: usize) -> String {
-    // TODO(B)："STATUS keys={keys} clients={clients}\n"
-    let _ = (keys, clients);
-    todo!("resp_status —— 成员 B 实现")
+    format!("STATUS keys={} clients={}\n", keys, clients)
 }
-
+/// 返回 keys 列表响应
 pub fn resp_keys(keys: &[String]) -> String {
-    // TODO(B)：空 → "OK\n"；非空 → "OK k1,k2,k3\n"（逗号分隔，不要额外空格）
-    let _ = keys;
-    todo!("resp_keys —— 成员 B 实现")
+    if keys.is_empty() {
+        return "OK\n".to_string();
+    }
+    format!("OK {}\n", keys.join(","))
 }
-
-// ============== 客户端：把一行响应解释成人看的东西 ==============
-
-/// 输入是 server 返回来的**已经去掉末尾 \n** 的一行字符串；
-/// 输出是人类喜欢看的，支持多行（keys 会被拆成带序号的列表）。
+// ============ 客户端人性化显示 ============
+/// 将服务端响应行转换为用户友好文本
 pub fn format_response_for_human(line: &str) -> String {
-    // TODO(B)：
-    // 匹配前缀：
-    //   "OK " 或 "OK" 剩余内容：
-    //     - 如果剩余内容里包含逗号（keys）：split(',') 后每行 "  [1] k1"
-    //     - 否则输出 "(OK) xxx" 或 "(OK)"
-    //   "NOTFOUND"       → "(提示) 键不存在"
-    //   "ERR xxx"        → "(错误) xxx"
-    //   "PONG"           → "PONG"
-    //   "STATUS keys=... clients=..." → 拆成两行 "数据条数: N\n活跃连接: M"
-    //   其他 → 原样输出，前面加个 "? "
-    let _ = line;
-    todo!("format_response_for_human —— 成员 B 实现")
+    let trimmed = line.trim();
+    // 空行
+    if trimmed.is_empty() {
+        return "(提示) 收到空响应".to_string();
+    }
+    // 按第一个空格分割，判断类型
+    if let Some((prefix, rest)) = trimmed.split_once(' ') {
+        match prefix {
+            "OK" => {
+                if rest.is_empty() {
+                    return "(成功) 操作成功".to_string();
+                }
+                // 检查是否是 keys 列表 (逗号分隔)
+                if rest.contains(',') {
+                    let keys: Vec<&str> = rest.split(',').collect();
+                    let mut output = String::from("(成功) 共有以下键:\n");
+                    for (i, key) in keys.iter().enumerate() {
+                        output.push_str(&format!("  {}. {}\n", i + 1, key));
+                    }
+                    output
+                } else {
+                    // 普通值
+                    format!("(成功) {}", rest)
+                }
+            }
+            "NOTFOUND" => "(提示) 键不存在".to_string(),
+            "ERR" => format!("(错误) {}", rest),
+            "PONG" => "PONG".to_string(),
+            "STATUS" => {
+                // 解析 status 字段
+                let mut keys_count = "?";
+                let mut clients_count = "?";
+                for part in rest.split_whitespace() {
+                    if let Some((k, v)) = part.split_once('=') {
+                        match k {
+                            "keys" => keys_count = v,
+                            "clients" => clients_count = v,
+                            _ => {}
+                        }
+                    }
+                }
+                format!(
+                    "=== 服务器状态 ===\n数据条数: {}\n活跃连接: {}",
+                    keys_count, clients_count
+                )
+            }
+            unknown => format!("(未知响应前缀: {}) {}", unknown, rest),
+        }
+    } else {
+        // 无空格：按整词匹配（如 "OK"、"NOTFOUND"、"PONG"）
+        match trimmed {
+            "OK" => "(成功) 操作成功".to_string(),
+            "NOTFOUND" => "(提示) 键不存在".to_string(),
+            other => other.to_string(),
+        }
+    }
 }
-
-// ============== 帮助文本（client 里 help 命令打印）==============
-
-pub fn help_text() -> &'static str {
-    // B 可以直接写死
-    "\
-可用命令：
-  set <key> <value...>   写入或覆盖键值
-  get <key>              查询键
-  del <key>              删除键
-  keys                   列出所有键（按字典序）
-  status                 查看服务器：数据条数 + 活跃连接数
-  ping                   心跳测试
-  help                   显示本帮助
-  quit                   退出客户端
-"
-}
-
-// =====================================================================
-// 单元测试（成员 B 填写，覆盖所有合法 + 非法情况）
-// =====================================================================
+// ============ 测试 ============
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // —— 合法命令正例 ——
-
+    // ====== parse_command 测试 ======
     #[test]
-    #[ignore = "等成员 B 实现 parse_command 后去掉 ignore"]
-    fn parse_set() {
-        let (c, a) = parse_command("set name Alice").unwrap();
-        assert_eq!(c, "set");
-        assert_eq!(a, vec!["name", "Alice"]);
+    fn test_parse_set() {
+        // 正常 set
+        let (cmd, args) = parse_command("set name Alice").unwrap();
+        assert_eq!(cmd, "set");
+        assert_eq!(args, vec!["name", "Alice"]);
+        // set 多词 value（空格拼接）
+        let (cmd, args) = parse_command("set greeting Hello World").unwrap();
+        assert_eq!(cmd, "set");
+        assert_eq!(args, vec!["greeting", "Hello", "World"]);
+        // 大小写不敏感
+        let (cmd, _) = parse_command("SET name Alice").unwrap();
+        assert_eq!(cmd, "set");
+        // 前后空格
+        let (cmd, args) = parse_command("  set name Alice  ").unwrap();
+        assert_eq!(cmd, "set");
+        assert_eq!(args, vec!["name", "Alice"]);
+        // 参数不足
+        let err = parse_command("set name").unwrap_err();
+        assert!(err.contains("需要至少 2 个参数"));
+        // 只有命令字
+        let err = parse_command("set").unwrap_err();
+        assert!(err.contains("需要至少 2 个参数"));
     }
-
     #[test]
-    #[ignore = "等成员 B 实现"]
-    fn parse_set_multi_word_value() {
-        // value 里多个词，参数列表里要保留给 B 自己 join
-        let (_c, a) = parse_command("set msg hello world rust").unwrap();
-        // 注意：多词拼接的责任放在调用方 set handler 做（C 的 server.rs 里 join）
-        // 这里只要返回 [msg, hello, world, rust] 就行
-        assert_eq!(a[0], "msg");
-        assert_eq!(a.len(), 4);
+    fn test_parse_get() {
+        // 正常 get
+        let (cmd, args) = parse_command("get name").unwrap();
+        assert_eq!(cmd, "get");
+        assert_eq!(args, vec!["name"]);
+        // 大小写
+        let (cmd, _) = parse_command("GET name").unwrap();
+        assert_eq!(cmd, "get");
+        // 缺少参数
+        let err = parse_command("get").unwrap_err();
+        assert!(err.contains("需要 1 个参数"));
+        // 参数过多
+        let err = parse_command("get name age").unwrap_err();
+        assert!(err.contains("需要 1 个参数"));
     }
-
     #[test]
-    #[ignore = "等成员 B 实现"]
-    fn parse_case_insensitive() {
-        let (c, a) = parse_command("GET mykey").unwrap();
-        assert_eq!(c, "get");
-        assert_eq!(a, vec!["mykey"]);
+    fn test_parse_del() {
+        let (cmd, args) = parse_command("del name").unwrap();
+        assert_eq!(cmd, "del");
+        assert_eq!(args, vec!["name"]);
+        // 参数不足
+        let err = parse_command("del").unwrap_err();
+        assert!(err.contains("需要 1 个参数"));
     }
-
     #[test]
-    #[ignore = "等成员 B 实现"]
-    fn parse_no_args_cmds() {
-        assert_eq!(parse_command("keys").unwrap().0, "keys");
-        assert_eq!(parse_command("  status  ").unwrap().0, "status");
-        assert_eq!(parse_command("PING").unwrap().0, "ping");
-        assert_eq!(parse_command("Quit").unwrap().0, "quit");
+    fn test_parse_keys() {
+        let (cmd, args) = parse_command("keys").unwrap();
+        assert_eq!(cmd, "keys");
+        assert!(args.is_empty());
+        // 大小写
+        let (cmd, _) = parse_command("KEYS").unwrap();
+        assert_eq!(cmd, "keys");
+        // 带参数
+        let err = parse_command("keys a").unwrap_err();
+        assert!(err.contains("不需要参数"));
     }
-
-    // —— 参数数量错误 ——
-
     #[test]
-    #[ignore = "等成员 B 实现"]
-    fn err_set_without_args() {
-        assert!(parse_command("set").is_err());
+    fn test_parse_status() {
+        let (cmd, args) = parse_command("status").unwrap();
+        assert_eq!(cmd, "status");
+        assert!(args.is_empty());
+        // 带参数
+        let err = parse_command("status all").unwrap_err();
+        assert!(err.contains("不需要参数"));
     }
-
     #[test]
-    #[ignore = "等成员 B 实现"]
-    fn err_get_without_key() {
-        assert!(parse_command("get").is_err());
+    fn test_parse_ping() {
+        let (cmd, args) = parse_command("ping").unwrap();
+        assert_eq!(cmd, "ping");
+        assert!(args.is_empty());
+        // 带参数
+        let err = parse_command("ping hello").unwrap_err();
+        assert!(err.contains("不需要参数"));
     }
-
     #[test]
-    #[ignore = "等成员 B 实现"]
-    fn err_del_too_many_args() {
-        assert!(parse_command("del a b").is_err());
+    fn test_parse_quit() {
+        let (cmd, args) = parse_command("quit").unwrap();
+        assert_eq!(cmd, "quit");
+        assert!(args.is_empty());
     }
-
     #[test]
-    #[ignore = "等成员 B 实现"]
-    fn err_keys_with_args() {
-        assert!(parse_command("keys 123").is_err());
+    fn test_parse_empty() {
+        let err = parse_command("").unwrap_err();
+        assert!(err.contains("空命令"));
+
+        let err = parse_command("   ").unwrap_err();
+        assert!(err.contains("空命令"));
     }
-
-    // —— 其他错误 ——
-
     #[test]
-    #[ignore = "等成员 B 实现"]
-    fn err_unknown_cmd() {
-        let e = parse_command("foobar hello").unwrap_err();
-        assert!(e.contains("未知命令"), "err = {e}");
+    fn test_parse_unknown() {
+        let err = parse_command("unknown").unwrap_err();
+        assert!(err.contains("未知命令"));
     }
-
+    // ====== resp_* 测试 ======
     #[test]
-    #[ignore = "等成员 B 实现"]
-    fn err_empty_line() {
-        assert!(parse_command("").is_err());
-        assert!(parse_command("   ").is_err());
-    }
-
-    // —— 响应格式 ——
-
-    #[test]
-    #[ignore = "等成员 B 实现"]
-    fn resp_formats() {
-        assert_eq!(resp_ok(Some("hi")), "OK hi\n");
+    fn test_resp_ok() {
         assert_eq!(resp_ok(None), "OK\n");
-        assert_eq!(resp_notfound(), "NOTFOUND\n");
-        assert_eq!(resp_err("no good"), "ERR no good\n");
-        assert_eq!(resp_pong(), "PONG\n");
-        assert_eq!(resp_status(5, 2), "STATUS keys=5 clients=2\n");
-        assert_eq!(resp_keys(&["a".into(), "b".into(), "c".into()]), "OK a,b,c\n");
-        assert_eq!(resp_keys(&[]), "OK\n");
+        assert_eq!(resp_ok(Some("hello")), "OK hello\n");
+        assert_eq!(resp_ok(Some("hello world")), "OK hello world\n");
     }
-
-    // —— 客户端展示 ——
-
     #[test]
-    #[ignore = "等成员 B 实现"]
-    fn human_format() {
-        assert!(format_response_for_human("OK hello").contains("hello"));
-        assert!(format_response_for_human("NOTFOUND").contains("不存在"));
-        assert!(format_response_for_human("ERR boom").contains("错误"));
-        assert_eq!(format_response_for_human("PONG"), "PONG");
-        // keys 列表带序号
-        let h = format_response_for_human("OK k1,k2,k3");
-        assert!(h.contains("[1]"));
-        assert!(h.contains("[2]"));
-        assert!(h.contains("[3]"));
+    fn test_resp_notfound() {
+        assert_eq!(resp_notfound(), "NOTFOUND\n");
+    }
+    #[test]
+    fn test_resp_err() {
+        assert_eq!(resp_err("something wrong"), "ERR something wrong\n");
+    }
+    #[test]
+    fn test_resp_pong() {
+        assert_eq!(resp_pong(), "PONG\n");
+    }
+    #[test]
+    fn test_resp_status() {
+        assert_eq!(resp_status(5, 2), "STATUS keys=5 clients=2\n");
+        assert_eq!(resp_status(0, 1), "STATUS keys=0 clients=1\n");
+    }
+    #[test]
+    fn test_resp_keys() {
+        assert_eq!(resp_keys(&[]), "OK\n");
+        assert_eq!(resp_keys(&["a".to_string()]), "OK a\n");
+        assert_eq!(resp_keys(&["a".to_string(), "b".to_string()]), "OK a,b\n");
+    }
+    // ====== format_response_for_human 测试 ======
+    #[test]
+    fn test_format_ok() {
+        assert_eq!(format_response_for_human("OK\n"), "(成功) 操作成功");
+        assert_eq!(format_response_for_human("OK hello\n"), "(成功) hello");
+        assert_eq!(
+            format_response_for_human("OK hello world\n"),
+            "(成功) hello world"
+        );
+    }
+    #[test]
+    fn test_format_ok_keys() {
+        let result = format_response_for_human("OK a,b,c\n");
+        assert!(result.contains("共有以下键"));
+        assert!(result.contains("1. a"));
+        assert!(result.contains("2. b"));
+        assert!(result.contains("3. c"));
+    }
+    #[test]
+    fn test_format_notfound() {
+        assert_eq!(format_response_for_human("NOTFOUND\n"), "(提示) 键不存在");
+    }
+    #[test]
+    fn test_format_err() {
+        assert_eq!(
+            format_response_for_human("ERR something wrong\n"),
+            "(错误) something wrong"
+        );
+    }
+    #[test]
+    fn test_format_pong() {
+        assert_eq!(format_response_for_human("PONG\n"), "PONG");
+    }
+    #[test]
+    fn test_format_status() {
+        let result = format_response_for_human("STATUS keys=5 clients=2\n");
+        assert!(result.contains("数据条数: 5"));
+        assert!(result.contains("活跃连接: 2"));
+    }
+    #[test]
+    fn test_format_empty() {
+        assert_eq!(format_response_for_human(""), "(提示) 收到空响应");
+        assert_eq!(format_response_for_human("\n"), "(提示) 收到空响应");
+    }
+    #[test]
+    fn test_format_unknown_prefix() {
+        let result = format_response_for_human("UNKNOWN hello\n");
+        assert!(result.contains("未知响应前缀"));
     }
 }

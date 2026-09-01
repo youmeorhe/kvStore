@@ -43,7 +43,7 @@ impl KvStore {
                 }
 
                 if line.starts_with("SET,") {
-                    // SET,key,value 
+                    // SET,key,value
                     let parts: Vec<&str> = line.splitn(3, ',').collect();
                     if parts.len() != 3 || parts[1].is_empty() {
                         return Err(anyhow!(
@@ -58,10 +58,7 @@ impl KvStore {
                     // DEL,key
                     let parts: Vec<&str> = line.splitn(2, ',').collect();
                     if parts.len() != 2 || parts[1].is_empty() {
-                        return Err(anyhow!(
-                            "日志格式错误：DEL 行需要 key，实际为 '{}'",
-                            line
-                        ));
+                        return Err(anyhow!("日志格式错误：DEL 行需要 key，实际为 '{}'", line));
                     }
                     let key = parts[1].to_string();
                     data.remove(&key);
@@ -232,7 +229,10 @@ mod tests {
         let (dir, path) = unique_dir("bad");
         fs::write(&path, "@@@@乱码垃圾内容@@@@\n").unwrap();
         let res = KvStore::open(&path);
-        assert!(res.is_err(), "损坏的文件必须返回 Err，不能 panic / 静默置空");
+        assert!(
+            res.is_err(),
+            "损坏的文件必须返回 Err，不能 panic / 静默置空"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
