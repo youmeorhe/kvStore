@@ -7,7 +7,7 @@ use std::thread;
 
 // ----- 依赖成员B的协议模块（必须存在） -----
 use kvstore::protocol;
-use kvstore::error::{KvError, Result};
+use anyhow::{anyhow, Result};
 
 // ----- 占位结构（成员A完成前使用） -----
 // 替换说明：当 storage::KvStore 完成后，删除此结构，
@@ -107,16 +107,16 @@ fn parse_args() -> Result<(u16, String)> {
         match arg.as_str() {
             "--port" => {
                 if let Some(p) = iter.next() {
-                    port = p.parse().map_err(|_| KvError("无效端口".into()))?;
+                    port = p.parse().map_err(|_| anyhow!("无效端口"))?;
                 } else {
-                    return Err(KvError("--port 需要参数".into()));
+                    return Err(anyhow!("--port 需要参数"));
                 }
             }
             "--data" => {
                 if let Some(p) = iter.next() {
                     data_path = p.clone();
                 } else {
-                    return Err(KvError("--data 需要参数".into()));
+                    return Err(anyhow!("--data 需要参数"));
                 }
             }
             "--help" | "-h" => {
@@ -129,7 +129,7 @@ fn parse_args() -> Result<(u16, String)> {
                 std::process::exit(0);
             }
             _ => {
-                return Err(KvError(format!("未知参数: {}, 使用 --help 查看用法", arg).into()));
+                return Err(anyhow!("未知参数: {}, 使用 --help 查看用法", arg));
             }
         }
     }

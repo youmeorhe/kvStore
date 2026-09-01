@@ -5,7 +5,8 @@
 
 #![allow(unused, dead_code)] // B 填代码阶段允许未使用的导入
 
-use kvstore::{protocol, Result};
+use kvstore::protocol;
+use anyhow::Result;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 

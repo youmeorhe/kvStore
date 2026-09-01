@@ -1,27 +1,20 @@
-//! 键值存储 + WAL 持久化（成员 A 负责实现）
-//! TODO：以下全是占位代码，A 把 todo!() 全替换成真实实现即可。
-
-#![allow(unused, dead_code)] // A/B/C 填代码阶段允许有未使用的导入/字段，不刷屏 warning
-
 use std::collections::BTreeMap;
 use std::fs::{create_dir_all, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write as IoWrite};
 use std::path::Path;
 use std::sync::Mutex;
 
-use crate::error::{KvError, Result};
+use anyhow::{anyhow, Result};
 
 /// 持久化键值存储。
-/// - 内存用 BTreeMap（keys 自带序）
+/// - 内存用 BTreeMap
 /// - 文件用 Append-Only 行日志：SET,key,value / DEL,key
 pub struct KvStore {
-    /// TODO(A)：把内存数据放这，BTreeMap<String, String>
     pub data: BTreeMap<String, String>,
-    /// TODO(A)：日志文件句柄，每次 set/del 追加一行后 sync_all()
     pub log_file: Mutex<File>,
 }
 
-/// 对外线程安全别名（成员 C 直接用这个类型）
+/// 对外线程安全别名
 pub type SharedKvStore = std::sync::Arc<std::sync::Mutex<KvStore>>;
 
 impl KvStore {
@@ -30,78 +23,135 @@ impl KvStore {
     /// - 如果文件不存在：创建新文件，空库启动
     /// - 如果文件格式损坏：返回 Err，**不自动清空**
     pub fn open(path: &str) -> Result<Self> {
-        // TODO(A)：真实实现
-        // 建议步骤：
-        //  1) 保证父目录存在：create_dir_all(Path::new(path).parent().unwrap_or(Path::new(".")))
-        //  2) 读已有文件（如果存在）逐行重放进 data：
-        //        "SET,k,v" => data.insert(k, v);  v 可能包含逗号（只有前两个是分隔符）
-        //        "DEL,k"   => data.remove(k);
-        //     任何格式错误（行无法拆分、空 key、SET 只有 2 段…）→ 立即 return Err
-        //     注意 value 里可能包含逗号，所以 SET 行按逗号 splitn(3, ',')
-        //  3) OpenOptions::new().append(true).create(true).open(path) 拿到 log_file
-        //  4) Ok(KvStore { data, log_file: Mutex::new(file) })
-        let _path = path;
-        todo!("KvStore::open —— 成员 A 实现")
+        let path_obj = Path::new(path);
+        // 1) 保证父目录存在
+        if let Some(parent) = path_obj.parent() {
+            create_dir_all(parent)?;
+        }
+
+        let mut data = BTreeMap::new();
+
+        // 2) 如果文件存在，读取并恢复数据
+        if path_obj.exists() {
+            let file = File::open(path_obj)?;
+            let reader = BufReader::new(file);
+            for line in reader.lines() {
+                let line = line?;
+                let line = line.trim_end();
+                if line.is_empty() {
+                    continue;
+                }
+
+                if line.starts_with("SET,") {
+                    // SET,key,value 
+                    let parts: Vec<&str> = line.splitn(3, ',').collect();
+                    if parts.len() != 3 || parts[1].is_empty() {
+                        return Err(anyhow!(
+                            "日志格式错误：SET 行需要 key 和 value，实际为 '{}'",
+                            line
+                        ));
+                    }
+                    let key = parts[1].to_string();
+                    let value = parts[2].to_string();
+                    data.insert(key, value);
+                } else if line.starts_with("DEL,") {
+                    // DEL,key
+                    let parts: Vec<&str> = line.splitn(2, ',').collect();
+                    if parts.len() != 2 || parts[1].is_empty() {
+                        return Err(anyhow!(
+                            "日志格式错误：DEL 行需要 key，实际为 '{}'",
+                            line
+                        ));
+                    }
+                    let key = parts[1].to_string();
+                    data.remove(&key);
+                } else {
+                    return Err(anyhow!("未知日志行格式：'{}'", line));
+                }
+            }
+        }
+
+        // 3) 以追加模式打开文件（如果不存在则创建）
+        let file = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path_obj)?;
+
+        Ok(KvStore {
+            data,
+            log_file: Mutex::new(file),
+        })
     }
 
-    /// 写入或覆盖。
+    /// 写入或覆盖
     /// 顺序：写日志(SET,k,v) → flush + sync_all → 改 data → 返回 Ok
-    pub fn set(&self, key: String, value: String) -> Result<()> {
-        // TODO(A)：真实实现
-        // 要点：
-        // - key.trim().is_empty() => return Err(KvError("key 不能为空".into()))
-        // - log_file.lock() 拿锁 → write_all(format!("SET,{key},{value}\n").as_bytes())
-        //   → flush() → sync_all()（保证落到磁盘）→ 失败都是 Err
-        // - 然后再 self.data.insert(key, value);
+    pub fn set(&mut self, key: String, value: String) -> Result<()> {
         if key.trim().is_empty() {
-            return Err(KvError("key 不能为空".into()));
+            return Err(anyhow!("key 不能为空"));
         }
-        let _ = value;
-        todo!("KvStore::set —— 成员 A 实现")
+
+        // 写日志
+        let log_line = format!("SET,{},{}\n", key, value);
+        let mut file_guard = self.log_file.lock().unwrap();
+        file_guard.write_all(log_line.as_bytes())?;
+        file_guard.flush()?;
+        file_guard.sync_all()?;
+
+        // 修改内存
+        self.data.insert(key, value);
+        Ok(())
     }
 
-    /// 删除。返回 Ok(true) 表示确实删了；Ok(false) 表示键本来就不存在（不写日志）。
-    pub fn del(&self, key: &str) -> Result<bool> {
-        // TODO(A)：真实实现
-        // 要点：key 存在才写 "DEL,{key}\n" 日志；不存在直接 Ok(false)
+    /// 删除。返回 Ok(true) 表示确实删了；Ok(false) 表示键本来就不存在（不写日志）
+    pub fn del(&mut self, key: &str) -> Result<bool> {
         if key.trim().is_empty() {
-            return Err(KvError("key 不能为空".into()));
+            return Err(anyhow!("key 不能为空"));
         }
-        todo!("KvStore::del —— 成员 A 实现")
+
+        if self.data.contains_key(key) {
+            // 写日志
+            let log_line = format!("DEL,{}\n", key);
+            let mut file_guard = self.log_file.lock().unwrap();
+            file_guard.write_all(log_line.as_bytes())?;
+            file_guard.flush()?;
+            file_guard.sync_all()?;
+
+            // 删除内存
+            self.data.remove(key);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
-    /// 查询（只读内存，不碰文件）。
+    /// 查询
     pub fn get(&self, key: &str) -> Option<String> {
-        // TODO(A)：真实实现 → self.data.get(key).cloned()
-        let _ = key;
-        todo!("KvStore::get —— 成员 A 实现")
+        self.data.get(key).cloned()
     }
 
-    /// 列出所有键，有序。
+    /// 列出所有键，有序
     pub fn keys(&self) -> Vec<String> {
-        // TODO(A)：真实实现 → self.data.keys().cloned().collect()
-        todo!("KvStore::keys —— 成员 A 实现")
+        self.data.keys().cloned().collect()
     }
 
-    /// 当前数据条数。
+    /// 当前数据条数
     pub fn len(&self) -> usize {
-        // TODO(A)：真实实现 → self.data.len()
-        todo!("KvStore::len —— 成员 A 实现")
+        self.data.len()
     }
 
-    /// 空库判断（clippy 喜欢有这个）
+    /// 空库判断
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 }
 
 // =====================================================================
-// 单元测试（成员 A 写真实用例，下面给出框架直接填断言就行）
-// 零依赖：不用 tempfile crate，自己建 target/storage-tests/<uuid> 临时目录
+// 单元测试
 // =====================================================================
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     fn unique_dir(suffix: &str) -> (std::path::PathBuf, String) {
@@ -118,12 +168,11 @@ mod tests {
         (dir, db.to_string_lossy().to_string())
     }
 
-    // 基本增删改查（A 实现后跑）
+    // 基本增删改查
     #[test]
-    #[ignore = "等成员 A 实现 KvStore 后去掉 ignore"]
     fn basic_set_get_del() {
-        let (_dir, path) = unique_dir("basic");
-        let kv = KvStore::open(&path).unwrap();
+        let (dir, path) = unique_dir("basic");
+        let mut kv = KvStore::open(&path).unwrap();
         kv.set("k1".into(), "v1".into()).unwrap();
         assert_eq!(kv.get("k1").as_deref(), Some("v1"));
         kv.set("k1".into(), "v2".into()).unwrap();
@@ -131,28 +180,28 @@ mod tests {
         assert!(kv.del("k1").unwrap());
         assert_eq!(kv.get("k1"), None);
         assert!(!kv.del("k1").unwrap());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // keys 有序
     #[test]
-    #[ignore = "等成员 A 实现 KvStore 后去掉 ignore"]
     fn keys_sorted() {
-        let (_dir, path) = unique_dir("keys");
-        let kv = KvStore::open(&path).unwrap();
+        let (dir, path) = unique_dir("keys");
+        let mut kv = KvStore::open(&path).unwrap();
         for k in ["banana", "apple", "cherry"] {
             kv.set(k.into(), "v".into()).unwrap();
         }
         assert_eq!(kv.keys(), vec!["apple", "banana", "cherry"]);
         assert_eq!(kv.len(), 3);
+        let _ = fs::remove_dir_all(&dir);
     }
 
-    // 重启恢复（最关键的测试）
+    // 重启恢复
     #[test]
-    #[ignore = "等成员 A 实现 KvStore 后去掉 ignore"]
     fn restart_recovery() {
         let (dir, path) = unique_dir("recover");
         {
-            let kv = KvStore::open(&path).unwrap();
+            let mut kv = KvStore::open(&path).unwrap();
             kv.set("a".into(), "1".into()).unwrap();
             kv.set("b".into(), "2".into()).unwrap();
             kv.del("a").unwrap();
@@ -161,43 +210,40 @@ mod tests {
         assert_eq!(kv2.get("a"), None);
         assert_eq!(kv2.get("b").as_deref(), Some("2"));
         assert_eq!(kv2.len(), 1);
-        // 清掉测试垃圾
-        let _ = std::fs::remove_dir_all(dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 
-    // value 里带逗号 / 空格（测试 SET,k,v 的 v 正确解析：取第一个逗号之后所有内容）
+    // value 里带逗号 / 空格
     #[test]
-    #[ignore = "等成员 A 实现 KvStore 后去掉 ignore"]
     fn value_with_comma_and_space() {
         let (dir, path) = unique_dir("commas");
         {
-            let kv = KvStore::open(&path).unwrap();
+            let mut kv = KvStore::open(&path).unwrap();
             kv.set("x".into(), "hello, world, foo".into()).unwrap();
         }
         let kv = KvStore::open(&path).unwrap();
         assert_eq!(kv.get("x").as_deref(), Some("hello, world, foo"));
-        let _ = std::fs::remove_dir_all(dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // 文件损坏要 Err 不要 panic 不要清空
     #[test]
-    #[ignore = "等成员 A 实现 KvStore 后去掉 ignore"]
     fn corrupted_file_is_err() {
         let (dir, path) = unique_dir("bad");
-        std::fs::write(&path, "@@@@乱码垃圾内容@@@@\n").unwrap();
+        fs::write(&path, "@@@@乱码垃圾内容@@@@\n").unwrap();
         let res = KvStore::open(&path);
         assert!(res.is_err(), "损坏的文件必须返回 Err，不能 panic / 静默置空");
-        let _ = std::fs::remove_dir_all(dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // 空 key 要拒绝
     #[test]
-    #[ignore = "等成员 A 实现 KvStore 后去掉 ignore"]
     fn empty_key_rejected() {
-        let (_dir, path) = unique_dir("emptykey");
-        let kv = KvStore::open(&path).unwrap();
+        let (dir, path) = unique_dir("emptykey");
+        let mut kv = KvStore::open(&path).unwrap();
         assert!(kv.set("".into(), "v".into()).is_err());
         assert!(kv.set("   ".into(), "v".into()).is_err());
         assert!(kv.del("").is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 }
