@@ -1,0 +1,18 @@
+[package]
+name = "kvstore"
+version = "0.1.0"
+edition = "2021"
+
+# ⚠️ 两天 MVP：零外部依赖，没网也能 cargo build，4 个人克隆下来直接干活
+# 需要 anyhow / tempfile 等库时，后面统一再加（前提是网络 OK）
+
+[[bin]]
+name = "server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "client"
+path = "src/bin/client.rs"
+
+[profile.dev]
+opt-level = 0

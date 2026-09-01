@@ -1,0 +1,8 @@
+# 国内 crates.io 镜像（字节 rsproxy，sparse 协议）
+# 用 sparse 协议的好处：走 HTTP 而不走 git，不受 git 全局代理配置影响，
+# 代理软件（Clash 等）没开也能正常下载依赖。
+[source.crates-io]
+replace-with = 'rsproxy-sparse'
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
