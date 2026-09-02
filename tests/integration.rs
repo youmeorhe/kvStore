@@ -303,6 +303,50 @@ fn t06_clear_all_data() {
     assert!(send_line(&mut c, "status").starts_with("STATUS keys=1"));
 }
 
+// t07：手动日志压缩——压缩后数据不变、重启恢复正确、文件确实变小
+#[test]
+fn t07_manual_compact() {
+    let (dir, dpath, port) = {
+        let srv = ServerHandle::start("compact");
+        {
+            let mut c = srv.connect();
+            // 制造废数据：同 key 反复覆盖 + 删除
+            for i in 0..30 {
+                send_line(&mut c, &format!("set hot v{i}")).ignore();
+            }
+            send_line(&mut c, "set keep hello").ignore();
+            send_line(&mut c, "set gone temp").ignore();
+            send_line(&mut c, "del gone").ignore();
+            // 压缩前文件大小（日志行数 32）
+            let size_before = std::fs::metadata(&srv.data_path).unwrap().len();
+            // 手动压缩
+            let resp = send_line(&mut c, "compact");
+            assert!(resp.starts_with("OK 日志压缩完成："), "实际响应：{resp}");
+            // 内存数据不变
+            assert_eq!(send_line(&mut c, "get hot"), "OK v29");
+            assert_eq!(send_line(&mut c, "get keep"), "OK hello");
+            assert_eq!(send_line(&mut c, "get gone"), "NOTFOUND");
+            // 文件确实变小（32 行 → 2 行）
+            let size_after = std::fs::metadata(&srv.data_path).unwrap().len();
+            assert!(
+                size_after < size_before,
+                "压缩后 {size_after}B 应小于压缩前 {size_before}B"
+            );
+            // 压缩后继续写正常
+            assert_eq!(send_line(&mut c, "set post ok"), "OK");
+        }
+        srv.stop_preserve_data()
+    };
+    // 重启：压缩后的日志重放结果正确
+    let srv2 = ServerHandle::restart(&dir, &dpath, port);
+    let mut c = srv2.connect();
+    assert_eq!(send_line(&mut c, "get hot"), "OK v29");
+    assert_eq!(send_line(&mut c, "get keep"), "OK hello");
+    assert_eq!(send_line(&mut c, "get gone"), "NOTFOUND");
+    assert_eq!(send_line(&mut c, "get post"), "OK ok");
+    assert!(send_line(&mut c, "status").starts_with("STATUS keys=3"));
+}
+
 #[test]
 fn t05_concurrent_clients() {
     use std::sync::Barrier;

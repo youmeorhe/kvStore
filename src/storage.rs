@@ -14,12 +14,7 @@ pub struct KvStore {
     pub log_file: Mutex<File>,
     /// 数据文件路径（clear 截断、compact rename 时需要）
     pub path: std::path::PathBuf,
-    /// 日志压缩触发阈值（字节）。超过且废数据过半才压缩。测试可调小。
-    pub compact_threshold: u64,
 }
-
-/// 默认压缩阈值：1MB
-pub const DEFAULT_COMPACT_THRESHOLD: u64 = 1024 * 1024;
 
 /// 对外线程安全别名
 pub type SharedKvStore = std::sync::Arc<std::sync::Mutex<KvStore>>;
@@ -96,7 +91,6 @@ impl KvStore {
             data,
             log_file: Mutex::new(file),
             path: path_obj.to_path_buf(),
-            compact_threshold: DEFAULT_COMPACT_THRESHOLD,
         })
     }
 
@@ -118,9 +112,6 @@ impl KvStore {
 
         // 修改内存
         self.data.insert(key, value);
-
-        // 落盘后检查是否需要压缩
-        self.maybe_compact();
         Ok(())
     }
 
@@ -142,9 +133,6 @@ impl KvStore {
 
             // 删除内存
             self.data.remove(key);
-
-            // 落盘后检查是否需要压缩
-            self.maybe_compact();
             Ok(true)
         } else {
             Ok(false)
@@ -194,41 +182,17 @@ impl KvStore {
     // ================= 日志压缩（Compaction）=================
 
     /// 当前日志文件大小（字节）
-    fn file_size(&self) -> Result<u64> {
+    pub fn file_size(&self) -> Result<u64> {
         let f = self.log_file.lock().unwrap();
         Ok(f.metadata()?.len())
     }
 
-    /// 内存有效数据的近似字节数（"SET,key,value\n" 每条开销 6 + 逗号 + 换行 ≈ 8）
-    fn live_bytes(&self) -> u64 {
-        self.data
-            .iter()
-            .map(|(k, v)| (k.len() + v.len() + 8) as u64)
-            .sum()
-    }
-
-    /// 写操作落盘后的检查点：双条件防抖触发压缩。
-    /// 条件1：文件超过 compact_threshold；
-    /// 条件2：有效数据不足文件一半（压缩有实际收益）。
-    /// 全干货文件不压，避免"压完还那么大→每次写都压缩"的性能雪崩。
-    /// 压缩失败只 warn 不上抛（降级运行，不中断服务）。
-    fn maybe_compact(&mut self) {
-        let size = match self.file_size() {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        if size < self.compact_threshold {
-            return;
-        }
-        if self.live_bytes() * 2 > size {
-            return; // 干货过半，压了没收益
-        }
-        if let Err(e) = self.compact() {
-            eprintln!("[warn] 日志压缩失败，继续使用旧日志: {e:#}");
-        }
-    }
-
-    /// 压缩：把内存最终状态重写成等价的最小日志，原子替换旧文件。
+    /// 手动压缩：把内存最终状态重写成等价的最小日志，原子替换旧文件。
+    /// 返回 (压缩前字节数, 压缩后字节数)。
+    /// 幂等：对已压缩的库再压，前=后。
+    ///
+    /// 压缩效果：同一 key 的多次 SET 只保留最后一次；已删除 key 的
+    /// SET/DEL 记录全部清除。重放压缩前后日志得到的状态完全一致。
     ///
     /// 流程（Windows 句柄顺序是关键）：
     /// ① 最终状态写 kv.db.tmp（create + sync_all，句柄随作用域关闭）
@@ -237,7 +201,8 @@ impl KvStore {
     ///      新句柄指向文件对象本身，rename 后自动"变成"正式文件句柄）
     /// ③ fs::rename(tmp → kv.db) 原子替换
     /// 任何一步失败：kv.db 原封不动，残留 tmp 由下次 open() 清理。
-    fn compact(&mut self) -> Result<()> {
+    pub fn compact(&mut self) -> Result<(u64, u64)> {
+        let before = self.file_size()?;
         let tmp_path = compact_tmp_path(&self.path);
 
         // ① 写临时文件
@@ -256,7 +221,9 @@ impl KvStore {
 
         // ③ 原子替换
         std::fs::rename(&tmp_path, &self.path)?;
-        Ok(())
+
+        let after = self.file_size()?;
+        Ok((before, after))
     }
 }
 
@@ -397,36 +364,31 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // ===== 日志压缩测试 =====
+    // ===== 日志压缩测试（手动触发）=====
 
-    // 压缩①：同 key 反复写 + 小阈值 → 触发压缩，文件大幅缩小
+    // 压缩①：同 key 反复写 → 手动压缩 → 文件缩回 1 行
     #[test]
     fn compact_shrinks_overwritten_log() {
         let (dir, path) = unique_dir("compact1");
         {
             let mut kv = KvStore::open(&path).unwrap();
-            kv.compact_threshold = 200; // 小阈值便于触发
             // 同一个 key 写 50 次：50 行日志，有效数据只有最后 1 条
             for i in 0..50 {
                 kv.set("hot".into(), format!("value-{i}")).unwrap();
             }
-            // 压缩应已触发。数学模型：阈值 200B ÷ 每行约 17B ≈ 每攒 12 行触发一次压缩，
-            // 循环"压缩→追加12行→再压缩"，最后一次压缩后最多残留 11 行左右。
-            // 断言"远小于 50"即证明压缩在工作（无压缩时就是 50 行）。
+            let (before, after) = kv.compact().unwrap();
+            assert!(before >= 50 * 15, "压缩前应至少 50 行");
+            assert_eq!(after, "SET,hot,value-49\n".len() as u64, "压缩后只 1 行");
+            // 文件内容精确等于 1 行
             let content = fs::read_to_string(&path).unwrap();
-            let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
-            assert!(
-                lines.len() <= 15,
-                "压缩后行数应大幅缩小（≤15），实际 {} 行",
-                lines.len()
-            );
-            // 最后一行必须是最后一次写入
-            let last = lines.last().unwrap();
-            assert!(last.starts_with("SET,hot,"));
-            assert!(last.ends_with("value-49"), "日志末尾应是最后一次写入");
+            assert_eq!(content, "SET,hot,value-49\n");
             // 无残留 tmp
             let tmp = std::path::Path::new(&dir).join("kv.db.tmp");
             assert!(!tmp.exists(), "压缩后不应残留 tmp 文件");
+            // 幂等：再压一次，前后相等
+            let (b2, a2) = kv.compact().unwrap();
+            assert_eq!(b2, a2);
+            assert_eq!(a2, after);
         }
         // 数据正确性不受影响
         let kv2 = KvStore::open(&path).unwrap();
@@ -434,13 +396,12 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // 压缩②：压缩后重开 → replay 数据完整
+    // 压缩②：压缩后重开 → replay 数据完整（含删除的键、带逗号的 value）
     #[test]
     fn compact_then_restart_keeps_data() {
         let (dir, path) = unique_dir("compact2");
         {
             let mut kv = KvStore::open(&path).unwrap();
-            kv.compact_threshold = 200;
             for i in 0..30 {
                 kv.set("a".into(), format!("va{i}")).unwrap(); // 废数据
             }
@@ -448,6 +409,7 @@ mod tests {
             kv.set("keep2".into(), "world, foo".into()).unwrap();
             kv.set("gone".into(), "x".into()).unwrap();
             kv.del("gone").unwrap();
+            kv.compact().unwrap();
         }
         let kv2 = KvStore::open(&path).unwrap();
         assert_eq!(kv2.get("keep1").as_deref(), Some("hello"));
@@ -464,10 +426,10 @@ mod tests {
         let (dir, path) = unique_dir("compact3");
         {
             let mut kv = KvStore::open(&path).unwrap();
-            kv.compact_threshold = 150;
             for i in 0..20 {
-                kv.set("x".into(), format!("v{i}")).unwrap(); // 触发压缩
+                kv.set("x".into(), format!("v{i}")).unwrap();
             }
+            kv.compact().unwrap();
             // 压缩后继续写：新句柄必须可用
             kv.set("post".into(), "after-compact".into()).unwrap();
             kv.del("x").unwrap();
@@ -478,6 +440,7 @@ mod tests {
                 kv.set("y".into(), format!("w{i}")).unwrap();
             }
             kv.set("final".into(), "done".into()).unwrap();
+            kv.compact().unwrap();
         }
         let kv2 = KvStore::open(&path).unwrap();
         assert_eq!(kv2.get("post"), None);
@@ -486,25 +449,27 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // 压缩④：全是干货 + 超阈值 → 不触发压缩（防抖）
+    // 压缩④：全干货压缩 → 前后字节数近似相等（无废数据可压）
     #[test]
-    fn compact_skipped_when_data_is_live() {
+    fn compact_all_live_data_is_stable() {
         let (dir, path) = unique_dir("compact4");
-        let mut kv = KvStore::open(&path).unwrap();
-        kv.compact_threshold = 300; // 小于即将写入的总量
-        // 写 60 个不同的 key：全是干货，无废数据
-        for i in 0..60 {
-            kv.set(format!("key-{i:03}"), format!("value-{i:03}")).unwrap();
+        {
+            let mut kv = KvStore::open(&path).unwrap();
+            for i in 0..60 {
+                kv.set(format!("key-{i:03}"), format!("value-{i:03}")).unwrap();
+            }
+            let (before, after) = kv.compact().unwrap();
+            // 60 条干货：压缩前后都应是 60 行，大小几乎相同
+            assert_eq!(before, after);
+            assert_eq!(kv.len(), 60);
+            let content = fs::read_to_string(&path).unwrap();
+            let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+            assert_eq!(lines.len(), 60);
         }
-        let content = fs::read_to_string(&path).unwrap();
-        let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
-        // 60 条全部保留 = 没被压缩重写（压缩会写 "SET,key-000,value-000" 顺序相同，
-        // 但关键是行数不会减少；再验证 get 全部在）
-        assert_eq!(lines.len(), 60, "全干货不应触发压缩，行数应保持 60");
-        assert_eq!(kv.len(), 60);
+        let kv2 = KvStore::open(&path).unwrap();
         for i in 0..60 {
             assert_eq!(
-                kv.get(&format!("key-{i:03}")).as_deref(),
+                kv2.get(&format!("key-{i:03}")).as_deref(),
                 Some(format!("value-{i:03}").as_str())
             );
         }

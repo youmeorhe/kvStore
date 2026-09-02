@@ -74,6 +74,12 @@ pub fn parse_command(line: &str) -> Result<(&str, Vec<&str>), String> {
             }
             Ok(("clear", vec![]))
         }
+        "compact" => {
+            if !args.is_empty() {
+                return Err("compact 命令不需要参数".to_string());
+            }
+            Ok(("compact", vec![]))
+        }
         "status" => {
             if !args.is_empty() {
                 return Err("status 命令不需要参数".to_string());
@@ -262,6 +268,19 @@ mod tests {
         assert_eq!(cmd, "clear");
         // 带参数
         let err = parse_command("clear all").unwrap_err();
+        assert!(err.contains("不需要参数"));
+    }
+
+    #[test]
+    fn test_parse_compact() {
+        let (cmd, args) = parse_command("compact").unwrap();
+        assert_eq!(cmd, "compact");
+        assert!(args.is_empty());
+        // 大小写
+        let (cmd, _) = parse_command("COMPACT").unwrap();
+        assert_eq!(cmd, "compact");
+        // 带参数
+        let err = parse_command("compact now").unwrap_err();
         assert!(err.contains("不需要参数"));
     }
     #[test]

@@ -198,6 +198,17 @@ fn dispatch(
                 .map_err(|e| e.to_string())?;
             Ok(protocol::resp_ok(Some(&format!("已清空 {} 条数据", removed))))
         }
+        "compact" => {
+            let (before, after) = kv
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .compact()
+                .map_err(|e| e.to_string())?;
+            Ok(protocol::resp_ok(Some(&format!(
+                "日志压缩完成：{}B → {}B",
+                before, after
+            ))))
+        }
         "status" => {
             let n = kv.lock().unwrap_or_else(|p| p.into_inner()).len();
             let c = clients.load(SeqCst);

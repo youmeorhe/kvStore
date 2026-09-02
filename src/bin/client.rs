@@ -101,6 +101,7 @@ fn print_help() {
   del <key>              删除键
   keys                   列出所有键
   clear                  清空所有数据（危险操作，不可恢复）
+  compact                手动压缩日志文件（清除覆盖/删除留下的废数据，不影响数据内容）
   status                 查看服务器状态（数据条数/活跃连接数）
   ping                   心跳测试
   quit                   退出客户端
