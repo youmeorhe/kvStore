@@ -75,8 +75,9 @@ fn main() {
                         break;
                     }
                     Ok(_) => {
-                        // 格式化并打印响应
-                        print!("{}", protocol::format_response_for_human(&response));
+                        // 格式化并打印响应（末尾补换行，避免与下一个 "> " 挤在同一行）
+                        let human = protocol::format_response_for_human(&response);
+                        println!("{}", human.trim_end_matches('\n'));
                     }
                     Err(e) => {
                         eprintln!("(错误) 读取响应失败: {}", e);
