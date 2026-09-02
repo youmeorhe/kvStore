@@ -347,6 +347,47 @@ fn t07_manual_compact() {
     assert!(send_line(&mut c, "status").starts_with("STATUS keys=3"));
 }
 
+// t08：超长请求防护——发送超过 1MB 的无换行数据，服务器应断开该连接，
+// 且不影响其他正常客户端
+#[test]
+fn t08_oversized_line_guard() {
+    use std::io::{Read, Write};
+
+    let srv = ServerHandle::start("oversize");
+    // 一个正常客户端先连上，稍后验证它不受影响
+    let mut normal = srv.connect();
+    assert_eq!(send_line(&mut normal, "ping"), "PONG");
+
+    // 恶意客户端：发送 2MB 无换行数据
+    let mut evil = srv.connect();
+    let payload = vec![b'A'; 2 * 1024 * 1024];
+    evil.write_all(&payload).unwrap();
+    evil.flush().unwrap();
+
+    // 服务器应回复 ERR 并断开该连接
+    let mut buf = [0u8; 256];
+    let n = evil.read(&mut buf).unwrap();
+    let first = String::from_utf8_lossy(&buf[..n]);
+    assert!(
+        first.contains("ERR") && first.contains("1MB"),
+        "应返回超长错误提示，实际：{first}"
+    );
+    // 连接已被服务器关闭。
+    // Windows 特性：服务器关闭时接收缓冲区还有未读数据（恶意载荷的剩余部分），
+    // 系统会发 RST 而非 FIN，客户端读到 ConnectionReset 而非 EOF——
+    // 两者都表示"连接已断开"，服务器行为正确
+    match evil.read(&mut buf) {
+        Ok(0) => {}                                                        // 干净的 EOF（Linux 常见）
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {}    // RST（Windows 常见）
+        other => panic!("连接应已断开（EOF 或 RST），实际：{other:?}"),
+    }
+
+    // 正常客户端完全不受影响
+    assert_eq!(send_line(&mut normal, "set still ok"), "OK");
+    assert_eq!(send_line(&mut normal, "get still"), "OK ok");
+    assert_eq!(send_line(&mut normal, "ping"), "PONG");
+}
+
 #[test]
 fn t05_concurrent_clients() {
     use std::sync::Barrier;
