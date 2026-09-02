@@ -388,6 +388,41 @@ fn t08_oversized_line_guard() {
     assert_eq!(send_line(&mut normal, "ping"), "PONG");
 }
 
+// t09：TTL 过期——setex 写入过期键、expire 追加过期、ttl 查询、过期后键消失
+#[test]
+fn t09_ttl_basic() {
+    let srv = ServerHandle::start("ttl");
+    let mut c = srv.connect();
+
+    // 永久键：ttl 返回 -1
+    assert_eq!(send_line(&mut c, "set perm forever"), "OK");
+    assert_eq!(send_line(&mut c, "ttl perm"), "OK -1");
+
+    // setex：写入 + 2 秒过期
+    assert_eq!(send_line(&mut c, "setex code 2 abc"), "OK 已设置，2 秒后过期");
+    assert_eq!(send_line(&mut c, "get code"), "OK abc");
+    // ttl 剩余时间应为 1~2 秒
+    let t = send_line(&mut c, "ttl code");
+    let secs: i64 = t.strip_prefix("OK ").unwrap().parse().unwrap();
+    assert!(secs >= 1 && secs <= 2, "ttl 剩余应 1~2 秒，实际：{t}");
+
+    // expire：给永久键追加过期
+    assert_eq!(send_line(&mut c, "expire perm 2"), "OK 已设置，2 秒后过期");
+    // expire 不存在的键 → NOTFOUND
+    assert_eq!(send_line(&mut c, "expire missing 5"), "NOTFOUND");
+    // ttl 不存在的键 → -2
+    assert_eq!(send_line(&mut c, "ttl missing"), "OK -2");
+
+    // 等过期（2s 过期 + 1s 余量）
+    std::thread::sleep(Duration::from_secs(3));
+
+    // 过期后：get 变 NOTFOUND，keys 不再包含它们
+    assert_eq!(send_line(&mut c, "get code"), "NOTFOUND");
+    assert_eq!(send_line(&mut c, "get perm"), "NOTFOUND");
+    assert_eq!(send_line(&mut c, "keys"), "OK");
+    assert!(send_line(&mut c, "status").starts_with("STATUS keys=0"));
+}
+
 #[test]
 fn t05_concurrent_clients() {
     use std::sync::Barrier;

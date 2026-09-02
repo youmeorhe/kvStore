@@ -62,6 +62,53 @@ pub fn parse_command(line: &str) -> Result<(&str, Vec<&str>), String> {
             }
             Ok(("del", args.to_vec()))
         }
+        // setex <key> <seconds> <value...>：写入并设置过期秒数（value 可多词）
+        "setex" => {
+            if args.len() < 3 {
+                return Err(
+                    "setex 命令需要至少 3 个参数: setex <key> <seconds> <value>".to_string(),
+                );
+            }
+            let key = args[0];
+            if key.is_empty() {
+                return Err("key 不能为空".to_string());
+            }
+            if args[1].parse::<u64>().is_err() {
+                return Err(format!(
+                    "seconds 必须是正整数（秒），实际为 '{}'",
+                    args[1]
+                ));
+            }
+            Ok(("setex", args.to_vec()))
+        }
+        // expire <key> <seconds>：给已存在的 key 设置过期
+        "expire" => {
+            if args.len() != 2 {
+                return Err("expire 命令需要 2 个参数: expire <key> <seconds>".to_string());
+            }
+            let key = args[0];
+            if key.is_empty() {
+                return Err("key 不能为空".to_string());
+            }
+            if args[1].parse::<u64>().is_err() {
+                return Err(format!(
+                    "seconds 必须是正整数（秒），实际为 '{}'",
+                    args[1]
+                ));
+            }
+            Ok(("expire", args.to_vec()))
+        }
+        // ttl <key>：查询剩余生存时间
+        "ttl" => {
+            if args.len() != 1 {
+                return Err("ttl 命令需要 1 个参数: ttl <key>".to_string());
+            }
+            let key = args[0];
+            if key.is_empty() {
+                return Err("key 不能为空".to_string());
+            }
+            Ok(("ttl", args.to_vec()))
+        }
         "keys" => {
             if !args.is_empty() {
                 return Err("keys 命令不需要参数".to_string());
@@ -319,6 +366,39 @@ mod tests {
     fn test_parse_unknown() {
         let err = parse_command("unknown").unwrap_err();
         assert!(err.contains("未知命令"));
+    }
+    // ====== TTL 命令解析测试 ======
+    #[test]
+    fn test_parse_setex() {
+        let (cmd, args) = parse_command("setex code 60 abc123").unwrap();
+        assert_eq!(cmd, "setex");
+        assert_eq!(args, vec!["code", "60", "abc123"]);
+        // value 多词拼接（args[2..] 全是 value）
+        let (_, args) = parse_command("SETEX k 5 hello world").unwrap();
+        assert_eq!(args, vec!["k", "5", "hello", "world"]);
+        // 参数不足
+        assert!(parse_command("setex k 60").unwrap_err().contains("3 个参数"));
+        assert!(parse_command("setex").unwrap_err().contains("3 个参数"));
+        // seconds 非正整数
+        assert!(parse_command("setex k abc v").unwrap_err().contains("正整数"));
+        assert!(parse_command("setex k -5 v").unwrap_err().contains("正整数"));
+    }
+    #[test]
+    fn test_parse_expire() {
+        let (cmd, args) = parse_command("expire k 30").unwrap();
+        assert_eq!(cmd, "expire");
+        assert_eq!(args, vec!["k", "30"]);
+        assert!(parse_command("expire k").unwrap_err().contains("2 个参数"));
+        assert!(parse_command("expire k 30 extra").unwrap_err().contains("2 个参数"));
+        assert!(parse_command("expire k xyz").unwrap_err().contains("正整数"));
+    }
+    #[test]
+    fn test_parse_ttl() {
+        let (cmd, args) = parse_command("ttl k").unwrap();
+        assert_eq!(cmd, "ttl");
+        assert_eq!(args, vec!["k"]);
+        assert!(parse_command("ttl").unwrap_err().contains("1 个参数"));
+        assert!(parse_command("ttl a b").unwrap_err().contains("1 个参数"));
     }
     // ====== resp_* 测试 ======
     #[test]

@@ -3,14 +3,77 @@ use std::fs::{create_dir_all, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write as IoWrite};
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
 
+/// key 合法性校验：非空且不含逗号。
+/// 逗号是日志行分隔符，key 含逗号会导致落盘后无法与分隔符区分（数据混淆），
+/// 因此显式拒绝（fail-fast），而不是静默存成错误的 key
+fn validate_key(key: &str) -> Result<()> {
+    if key.trim().is_empty() {
+        return Err(anyhow!("key 不能为空"));
+    }
+    if key.contains(',') {
+        return Err(anyhow!("key 不能包含逗号（日志分隔符），请使用其他字符"));
+    }
+    Ok(())
+}
+
+/// 带过期信息的值条目（TTL 支持）
+#[derive(Clone, Debug, PartialEq)]
+pub struct ValueEntry {
+    pub value: String,
+    /// 过期时刻（进程内单调时钟）。None = 永不过期
+    pub expire_at: Option<Instant>,
+}
+
+impl ValueEntry {
+    /// 永不过期条目
+    pub fn permanent(value: String) -> Self {
+        Self { value, expire_at: None }
+    }
+    /// 是否存活（未过期）
+    pub fn alive(&self) -> bool {
+        match self.expire_at {
+            None => true,
+            Some(t) => Instant::now() < t,
+        }
+    }
+}
+
+/// 当前 Unix 时间戳（毫秒）。用于把过期时刻序列化进日志：
+/// Instant 无法跨进程/跨重启使用，落盘必须用绝对时间，加载时再换算回 Instant
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// 把"now + ttl 秒"换算成 Unix 毫秒时间戳（用于写日志）
+fn unix_ms_after_secs(secs: u64) -> u64 {
+    now_unix_ms() + secs * 1000
+}
+
+/// 把 Unix 毫秒时间戳换算回 Instant（用于重放加载）。
+/// 已过期的时间戳会得到一个已过去的 Instant，由存活检查统一处理
+fn instant_from_unix_ms(ms: u64) -> Instant {
+    let now = now_unix_ms();
+    if ms <= now {
+        Instant::now()
+    } else {
+        Instant::now() + Duration::from_millis(ms - now)
+    }
+}
+
 /// 持久化键值存储。
-/// - 内存用 BTreeMap
-/// - 文件用 Append-Only 行日志：SET,key,value / DEL,key
+/// - 内存用 BTreeMap（值带可选过期时刻）
+/// - 文件用 Append-Only 行日志：
+///   `SET,key,value`（永不过期）/ `SETX,key,value,unix_ms`（带过期）
+///   `DEL,key` / `EXPIRE,key,unix_ms`
 pub struct KvStore {
-    pub data: BTreeMap<String, String>,
+    pub data: BTreeMap<String, ValueEntry>,
     pub log_file: Mutex<File>,
     /// 数据文件路径（clear 截断、compact rename 时需要）
     pub path: std::path::PathBuf,
@@ -51,29 +114,64 @@ impl KvStore {
                     continue;
                 }
 
-                if line.starts_with("SET,") {
-                    // SET,key,value
-                    let parts: Vec<&str> = line.splitn(3, ',').collect();
-                    if parts.len() != 3 || parts[1].is_empty() {
-                        return Err(anyhow!(
-                            "日志格式错误：SET 行需要 key 和 value，实际为 '{}'",
-                            line
-                        ));
+                if let Some(rest) = line.strip_prefix("SET,") {
+                    // SET,key,value（永不过期）
+                    let (key, value) = rest
+                        .split_once(',')
+                        .ok_or_else(|| anyhow!("日志格式错误：SET 行需要 key 和 value，实际为 '{}'", line))?;
+                    if key.is_empty() {
+                        return Err(anyhow!("日志格式错误：SET 行 key 为空，实际为 '{}'", line));
                     }
-                    let key = parts[1].to_string();
-                    let value = parts[2].to_string();
-                    data.insert(key, value);
-                } else if line.starts_with("DEL,") {
+                    data.insert(key.to_string(), ValueEntry::permanent(value.to_string()));
+                } else if let Some(rest) = line.strip_prefix("SETX,") {
+                    // SETX,key,value,unix_ms（带过期）。
+                    // value 本身可含逗号：先从左边切出 key，再从右边切出时间戳，中间全是 value
+                    let (key, rest) = rest
+                        .split_once(',')
+                        .ok_or_else(|| anyhow!("日志格式错误：SETX 行需要 key/value/时间戳，实际为 '{}'", line))?;
+                    let (value, ts_str) = rest
+                        .rsplit_once(',')
+                        .ok_or_else(|| anyhow!("日志格式错误：SETX 行需要过期时间戳，实际为 '{}'", line))?;
+                    let expire_ms: u64 = ts_str
+                        .parse()
+                        .map_err(|_| anyhow!("日志格式错误：SETX 行时间戳无效，实际为 '{}'", line))?;
+                    if key.is_empty() {
+                        return Err(anyhow!("日志格式错误：SETX 行 key 为空，实际为 '{}'", line));
+                    }
+                    data.insert(
+                        key.to_string(),
+                        ValueEntry { value: value.to_string(), expire_at: Some(instant_from_unix_ms(expire_ms)) },
+                    );
+                } else if let Some(rest) = line.strip_prefix("EXPIRE,") {
+                    // EXPIRE,key,unix_ms（对已存在的 key 设置/覆盖过期时刻；
+                    // key 不存在则忽略——与运行时 expire 对不存在键返回 false 的语义一致）
+                    let (key, ts_str) = rest
+                        .split_once(',')
+                        .ok_or_else(|| anyhow!("日志格式错误：EXPIRE 行需要 key/时间戳，实际为 '{}'", line))?;
+                    let expire_ms: u64 = ts_str
+                        .parse()
+                        .map_err(|_| anyhow!("日志格式错误：EXPIRE 行时间戳无效，实际为 '{}'", line))?;
+                    if let Some(entry) = data.get_mut(key) {
+                        entry.expire_at = Some(instant_from_unix_ms(expire_ms));
+                    }
+                } else if let Some(rest) = line.strip_prefix("DEL,") {
                     // DEL,key
-                    let parts: Vec<&str> = line.splitn(2, ',').collect();
-                    if parts.len() != 2 || parts[1].is_empty() {
+                    if rest.is_empty() {
                         return Err(anyhow!("日志格式错误：DEL 行需要 key，实际为 '{}'", line));
                     }
-                    let key = parts[1].to_string();
-                    data.remove(&key);
+                    data.remove(rest);
                 } else {
                     return Err(anyhow!("未知日志行格式：'{}'", line));
                 }
+            }
+            // 重放完成：清理已过期的条目（宕机期间到期的不占内存、不对外可见）
+            let expired: Vec<String> = data
+                .iter()
+                .filter(|(_, e)| !e.alive())
+                .map(|(k, _)| k.clone())
+                .collect();
+            for k in expired {
+                data.remove(&k);
             }
         }
 
@@ -97,9 +195,7 @@ impl KvStore {
     /// 写入或覆盖
     /// 顺序：写日志(SET,k,v) → flush + sync_all → 改 data → 返回 Ok
     pub fn set(&mut self, key: String, value: String) -> Result<()> {
-        if key.trim().is_empty() {
-            return Err(anyhow!("key 不能为空"));
-        }
+        validate_key(&key)?;
 
         // 写日志
         let log_line = format!("SET,{},{}\n", key, value);
@@ -110,18 +206,82 @@ impl KvStore {
             file_guard.sync_all()?;
         } // file_guard 在此显式释放，避免与后面的 &mut self 借用冲突
 
-        // 修改内存
-        self.data.insert(key, value);
+        // 修改内存（set 覆盖语义：同时清除旧 TTL，与 Redis SET 行为一致）
+        self.data.insert(key, ValueEntry::permanent(value));
         Ok(())
     }
 
-    /// 删除。返回 Ok(true) 表示确实删了；Ok(false) 表示键本来就不存在（不写日志）
-    pub fn del(&mut self, key: &str) -> Result<bool> {
-        if key.trim().is_empty() {
-            return Err(anyhow!("key 不能为空"));
+    /// 写入并设置过期秒数（TTL）。
+    /// 顺序与 set 相同：写日志(SETX) → 刷盘 → 改内存
+    pub fn setex(&mut self, key: String, secs: u64, value: String) -> Result<()> {
+        validate_key(&key)?;
+        let expire_ms = unix_ms_after_secs(secs);
+        let log_line = format!("SETX,{},{},{}\n", key, value, expire_ms);
+        {
+            let mut file_guard = self.log_file.lock().unwrap();
+            file_guard.write_all(log_line.as_bytes())?;
+            file_guard.flush()?;
+            file_guard.sync_all()?;
         }
+        self.data.insert(
+            key,
+            ValueEntry {
+                value,
+                expire_at: Some(Instant::now() + Duration::from_secs(secs)),
+            },
+        );
+        Ok(())
+    }
 
-        if self.data.contains_key(key) {
+    /// 给已存在的 key 设置过期秒数。返回 Ok(false) 表示键不存在（不写日志）。
+    /// 已过期的 key 视为不存在。
+    pub fn expire(&mut self, key: &str, secs: u64) -> Result<bool> {
+        validate_key(key)?;
+        // 只对"存活"的 key 生效
+        let alive = self.data.get(key).is_some_and(|e| e.alive());
+        if !alive {
+            return Ok(false);
+        }
+        let expire_ms = unix_ms_after_secs(secs);
+        let log_line = format!("EXPIRE,{},{}\n", key, expire_ms);
+        {
+            let mut file_guard = self.log_file.lock().unwrap();
+            file_guard.write_all(log_line.as_bytes())?;
+            file_guard.flush()?;
+            file_guard.sync_all()?;
+        }
+        if let Some(entry) = self.data.get_mut(key) {
+            entry.expire_at = Some(Instant::now() + Duration::from_secs(secs));
+        }
+        Ok(true)
+    }
+
+    /// 查询剩余生存时间（秒）。返回值约定与 Redis 一致：
+    /// - Some(-1)：键存在且永不过期
+    /// - Some(-2)：键不存在或已过期
+    /// - Some(n>=0)：剩余 n 秒
+    pub fn ttl(&self, key: &str) -> Option<i64> {
+        match self.data.get(key) {
+            None => Some(-2),
+            Some(e) if !e.alive() => Some(-2),
+            Some(e) => match e.expire_at {
+                None => Some(-1),
+                Some(t) => {
+                    let remain = t.saturating_duration_since(Instant::now());
+                    // 向上取整：还剩 1ms 也算剩 1 秒，避免"刚 setex 2 秒就查 ttl 得 1"
+                    Some(remain.as_secs() as i64 + if remain.subsec_millis() > 0 { 1 } else { 0 })
+                }
+            },
+        }
+    }
+
+    /// 删除。返回 Ok(true) 表示确实删了；Ok(false) 表示键本来就不存在（不写日志）。
+    /// 已过期的键视为不存在（返回 false）。
+    pub fn del(&mut self, key: &str) -> Result<bool> {
+        validate_key(key)?;
+
+        let alive = self.data.get(key).is_some_and(|e| e.alive());
+        if alive {
             // 写日志
             let log_line = format!("DEL,{}\n", key);
             {
@@ -139,19 +299,32 @@ impl KvStore {
         }
     }
 
-    /// 查询
-    pub fn get(&self, key: &str) -> Option<String> {
-        self.data.get(key).cloned()
+    /// 查询（惰性删除：访问到已过期的键时顺手从内存移除）。
+    /// 需要 &mut self——代价是调用方须持写锁，但 server 本来就是单锁模型，无额外开销。
+    /// 内存删除不写 DEL 日志：重放时过期条目会被统一清理，无需日志也能保持一致
+    pub fn get(&mut self, key: &str) -> Option<String> {
+        match self.data.get(key) {
+            Some(e) if e.alive() => Some(e.value.clone()),
+            Some(_) => {
+                self.data.remove(key); // 惰性删除
+                None
+            }
+            None => None,
+        }
     }
 
-    /// 列出所有键，有序
+    /// 列出所有键，有序（过滤已过期）
     pub fn keys(&self) -> Vec<String> {
-        self.data.keys().cloned().collect()
+        self.data
+            .iter()
+            .filter(|(_, e)| e.alive())
+            .map(|(k, _)| k.clone())
+            .collect()
     }
 
-    /// 当前数据条数
+    /// 当前数据条数（过滤已过期）
     pub fn len(&self) -> usize {
-        self.data.len()
+        self.data.iter().filter(|(_, e)| e.alive()).count()
     }
 
     /// 空库判断
@@ -205,11 +378,22 @@ impl KvStore {
         let before = self.file_size()?;
         let tmp_path = compact_tmp_path(&self.path);
 
-        // ① 写临时文件
+        // ① 写临时文件（只写存活条目；过期的键在这里被永久清除——"压缩即清理"）
         {
             let mut tmp = File::create(&tmp_path)?;
-            for (k, v) in &self.data {
-                writeln!(tmp, "SET,{},{}", k, v)?;
+            for (k, e) in &self.data {
+                if !e.alive() {
+                    continue;
+                }
+                match e.expire_at {
+                    None => writeln!(tmp, "SET,{},{}", k, e.value)?,
+                    // 过期时刻用绝对 Unix 毫秒回写：压缩后重启仍能正确恢复剩余 TTL
+                    Some(t) => {
+                        let remain = t.saturating_duration_since(Instant::now());
+                        let ms = now_unix_ms() + remain.as_millis() as u64;
+                        writeln!(tmp, "SETX,{},{},{}", k, e.value, ms)?;
+                    }
+                }
             }
             tmp.sync_all()?;
         } // tmp 句柄在此关闭
@@ -288,7 +472,7 @@ mod tests {
             kv.set("b".into(), "2".into()).unwrap();
             kv.del("a").unwrap();
         }
-        let kv2 = KvStore::open(&path).unwrap();
+        let mut kv2 = KvStore::open(&path).unwrap();
         assert_eq!(kv2.get("a"), None);
         assert_eq!(kv2.get("b").as_deref(), Some("2"));
         assert_eq!(kv2.len(), 1);
@@ -303,7 +487,7 @@ mod tests {
             let mut kv = KvStore::open(&path).unwrap();
             kv.set("x".into(), "hello, world, foo".into()).unwrap();
         }
-        let kv = KvStore::open(&path).unwrap();
+        let mut kv = KvStore::open(&path).unwrap();
         assert_eq!(kv.get("x").as_deref(), Some("hello, world, foo"));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -348,7 +532,7 @@ mod tests {
             kv.set("d".into(), "4".into()).unwrap();
         }
         // 重启：只有 clear 之后写入的 d 在，a/b/c 不复活
-        let kv2 = KvStore::open(&path).unwrap();
+        let mut kv2 = KvStore::open(&path).unwrap();
         assert_eq!(kv2.len(), 1);
         assert_eq!(kv2.get("d").as_deref(), Some("4"));
         let _ = fs::remove_dir_all(&dir);
@@ -391,7 +575,7 @@ mod tests {
             assert_eq!(a2, after);
         }
         // 数据正确性不受影响
-        let kv2 = KvStore::open(&path).unwrap();
+        let mut kv2 = KvStore::open(&path).unwrap();
         assert_eq!(kv2.get("hot").as_deref(), Some("value-49"));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -411,7 +595,7 @@ mod tests {
             kv.del("gone").unwrap();
             kv.compact().unwrap();
         }
-        let kv2 = KvStore::open(&path).unwrap();
+        let mut kv2 = KvStore::open(&path).unwrap();
         assert_eq!(kv2.get("keep1").as_deref(), Some("hello"));
         assert_eq!(kv2.get("keep2").as_deref(), Some("world, foo"));
         assert_eq!(kv2.get("a").as_deref(), Some("va29")); // 最后一次
@@ -442,7 +626,7 @@ mod tests {
             kv.set("final".into(), "done".into()).unwrap();
             kv.compact().unwrap();
         }
-        let kv2 = KvStore::open(&path).unwrap();
+        let mut kv2 = KvStore::open(&path).unwrap();
         assert_eq!(kv2.get("post"), None);
         assert_eq!(kv2.get("y").as_deref(), Some("w19"));
         assert_eq!(kv2.get("final").as_deref(), Some("done"));
@@ -466,13 +650,127 @@ mod tests {
             let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
             assert_eq!(lines.len(), 60);
         }
-        let kv2 = KvStore::open(&path).unwrap();
+        let mut kv2 = KvStore::open(&path).unwrap();
         for i in 0..60 {
             assert_eq!(
                 kv2.get(&format!("key-{i:03}")).as_deref(),
                 Some(format!("value-{i:03}").as_str())
             );
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ===== TTL 过期测试 =====
+
+    // TTL①：setex 后立即 get 有值；过期后 get 触发惰性删除
+    #[test]
+    fn ttl_basic_expiry() {
+        let (dir, path) = unique_dir("ttl1");
+        {
+            let mut kv = KvStore::open(&path).unwrap();
+            kv.setex("code".into(), 1, "abc".into()).unwrap();
+            assert_eq!(kv.get("code").as_deref(), Some("abc"));
+            // ttl 查询：1 秒过期刚写入，剩余应为 1（向上取整）
+            assert_eq!(kv.ttl("code"), Some(1));
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            // 过期：get 触发惰性删除
+            assert_eq!(kv.get("code"), None);
+            assert_eq!(kv.ttl("code"), Some(-2));
+            assert!(!kv.keys().contains(&"code".to_string()));
+            assert_eq!(kv.len(), 0);
+        }
+        // 重启：宕机期间已过期 → 重放后清理
+        let mut kv2 = KvStore::open(&path).unwrap();
+        assert_eq!(kv2.get("code"), None);
+        assert_eq!(kv2.len(), 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // TTL②：expire 给已有 key 加过期；ttl 三态（剩余/-1 永久/-2 不存在）
+    #[test]
+    fn ttl_expire_and_three_states() {
+        let (dir, path) = unique_dir("ttl2");
+        let mut kv = KvStore::open(&path).unwrap();
+        kv.set("perm".into(), "v".into()).unwrap();
+        assert_eq!(kv.ttl("perm"), Some(-1)); // 永不过期
+        assert_eq!(kv.ttl("missing"), Some(-2)); // 不存在
+        // expire 已存在的 key
+        assert!(kv.expire("perm", 3600).unwrap());
+        assert_eq!(kv.ttl("perm"), Some(3600));
+        // expire 不存在的 key → false，不写日志
+        assert!(!kv.expire("ghost".into(), 10).unwrap());
+        // set 覆盖会清除 TTL（Redis SET 语义）
+        kv.set("perm".into(), "v2".into()).unwrap();
+        assert_eq!(kv.ttl("perm"), Some(-1));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // TTL③：TTL 跨重启——重启后剩余 TTL 依然正确、未过期的存活
+    #[test]
+    fn ttl_survives_restart() {
+        let (dir, path) = unique_dir("ttl3");
+        {
+            let mut kv = KvStore::open(&path).unwrap();
+            kv.setex("long".into(), 3600, "still-here".into()).unwrap();
+            kv.setex("short".into(), 1, "will-expire".into()).unwrap();
+            kv.set("perm".into(), "forever".into()).unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1100)); // short 过期
+        let mut kv2 = KvStore::open(&path).unwrap();
+        assert_eq!(kv2.get("perm").as_deref(), Some("forever"));
+        assert_eq!(kv2.get("long").as_deref(), Some("still-here"));
+        // 剩余 TTL 应接近 3600（重放时按剩余时间重算）
+        let t = kv2.ttl("long").unwrap();
+        assert!(t >= 3590 && t <= 3600, "剩余 TTL 应约 3600，实际 {t}");
+        assert_eq!(kv2.get("short"), None); // 重放后被清理
+        assert_eq!(kv2.len(), 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // TTL④：压缩保留 TTL；value 带逗号的 SETX 行解析正确（key 不允许逗号）
+    #[test]
+    fn ttl_compact_and_comma_value() {
+        let (dir, path) = unique_dir("ttl4");
+        {
+            let mut kv = KvStore::open(&path).unwrap();
+            kv.setex("withcomma".into(), 3600, "a,b,c".into()).unwrap();
+            kv.setex("dead".into(), 1, "x".into()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            kv.compact().unwrap(); // dead 已过期 → 压缩清除；withcomma 的 TTL 保留
+        }
+        let mut kv2 = KvStore::open(&path).unwrap();
+        // value 带逗号：SETX,k,v,ts 从右边切时间戳，中间全是 value
+        assert_eq!(kv2.get("withcomma").as_deref(), Some("a,b,c"));
+        assert!(kv2.ttl("withcomma").unwrap() > 0, "压缩后 TTL 应保留");
+        assert_eq!(kv2.get("dead"), None);
+        assert_eq!(kv2.len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // key 含逗号要拒绝：逗号是日志分隔符，含逗号的 key 落盘后会与分隔符混淆
+    #[test]
+    fn comma_key_rejected() {
+        let (dir, path) = unique_dir("commakey");
+        let mut kv = KvStore::open(&path).unwrap();
+        assert!(kv.set("a,b".into(), "v".into()).is_err());
+        assert!(kv.setex("a,b".into(), 10, "v".into()).is_err());
+        assert!(kv.expire("a,b", 10).is_err());
+        assert!(kv.del("a,b").is_err());
+        // 拒绝的写入不落日志
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.is_empty(), "被拒绝的命令不应写日志，实际：{content}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // TTL⑤：旧格式日志（无 SETX/EXPIRE）向后兼容
+    #[test]
+    fn ttl_backward_compat_old_log() {
+        let (dir, path) = unique_dir("ttl5");
+        fs::write(&path, "SET,a,1\nDEL,b\nSET,c,3\n").unwrap();
+        let mut kv = KvStore::open(&path).unwrap();
+        assert_eq!(kv.get("a").as_deref(), Some("1"));
+        assert_eq!(kv.get("c").as_deref(), Some("3"));
+        assert_eq!(kv.ttl("a"), Some(-1)); // 旧数据永不过期
         let _ = fs::remove_dir_all(&dir);
     }
 }

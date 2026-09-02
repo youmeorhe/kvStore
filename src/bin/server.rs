@@ -242,8 +242,9 @@ fn dispatch(
             Ok(protocol::resp_ok(None))
         }
         "get" => {
-            let value = kv.lock().unwrap_or_else(|p| p.into_inner()).get(args[0]);
-            match value {
+            // get 需要 &mut（惰性删除：过期键访问时顺手清掉）
+            let mut guard = kv.lock().unwrap_or_else(|p| p.into_inner());
+            match guard.get(args[0]) {
                 Some(v) => Ok(protocol::resp_ok(Some(&v))),
                 None => Ok(protocol::resp_notfound()),
             }
@@ -259,6 +260,46 @@ fn dispatch(
             } else {
                 Ok(protocol::resp_notfound())
             }
+        }
+        // setex <key> <seconds> <value...>：写入并设置过期
+        "setex" => {
+            let secs: u64 = args[1].parse().unwrap();
+            let key = args[0].to_string();
+            let value = args[2..].join(" ");
+            kv.lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .setex(key, secs, value)
+                .map_err(|e| e.to_string())?;
+            Ok(protocol::resp_ok(Some(&format!(
+                "已设置，{} 秒后过期",
+                secs
+            ))))
+        }
+        // expire <key> <seconds>：给已存在 key 设置过期
+        "expire" => {
+            let secs: u64 = args[1].parse().unwrap();
+            let ok = kv
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .expire(args[0], secs)
+                .map_err(|e| e.to_string())?;
+            if ok {
+                Ok(protocol::resp_ok(Some(&format!(
+                    "已设置，{} 秒后过期",
+                    secs
+                ))))
+            } else {
+                Ok(protocol::resp_notfound())
+            }
+        }
+        // ttl <key>：剩余秒数 / -1 永不过期 / -2 不存在
+        "ttl" => {
+            let t = kv
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .ttl(args[0])
+                .unwrap_or(-2);
+            Ok(protocol::resp_ok(Some(&t.to_string())))
         }
         "keys" => {
             let keys = kv.lock().unwrap_or_else(|p| p.into_inner()).keys();

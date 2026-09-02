@@ -99,6 +99,9 @@ fn print_help() {
   set <key> <value...>   写入/覆盖键值对
   get <key>              查询键对应的值
   del <key>              删除键
+  setex <key> <seconds> <value...> 写入并设置过期秒数
+  expire <key> <seconds> 给已存在的键设置过期秒数
+  ttl <key>              查询键的剩余生存时间（秒）
   keys                   列出所有键
   clear                  清空所有数据（危险操作，不可恢复）
   compact                手动压缩日志文件（清除覆盖/删除留下的废数据，不影响数据内容）
