@@ -275,6 +275,35 @@ fn t04_restart_recovery() {
 }
 
 #[test]
+fn t06_clear_all_data() {
+    let (dir, dpath, port) = {
+        let srv = ServerHandle::start("clear");
+        {
+            let mut c = srv.connect();
+            send_line(&mut c, "set a 1").ignore();
+            send_line(&mut c, "set b 2").ignore();
+            send_line(&mut c, "set c 3").ignore();
+            // 清空：返回清空条数
+            assert_eq!(send_line(&mut c, "clear"), "OK 已清空 3 条数据");
+            // 内存已空
+            assert_eq!(send_line(&mut c, "keys"), "OK");
+            assert!(send_line(&mut c, "status").starts_with("STATUS keys=0"));
+            // 空库再 clear 幂等
+            assert_eq!(send_line(&mut c, "clear"), "OK 已清空 0 条数据");
+            // clear 后继续写入正常
+            assert_eq!(send_line(&mut c, "set d 4"), "OK");
+        }
+        srv.stop_preserve_data()
+    };
+    // 重启：日志已截断，只有 clear 之后写入的 d 在
+    let srv2 = ServerHandle::restart(&dir, &dpath, port);
+    let mut c = srv2.connect();
+    assert_eq!(send_line(&mut c, "get a"), "NOTFOUND");
+    assert_eq!(send_line(&mut c, "get d"), "OK 4");
+    assert!(send_line(&mut c, "status").starts_with("STATUS keys=1"));
+}
+
+#[test]
 fn t05_concurrent_clients() {
     use std::sync::Barrier;
 

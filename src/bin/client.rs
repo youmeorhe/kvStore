@@ -99,6 +99,7 @@ fn print_help() {
   get <key>              查询键对应的值
   del <key>              删除键
   keys                   列出所有键
+  clear                  清空所有数据（危险操作，不可恢复）
   status                 查看服务器状态（数据条数/活跃连接数）
   ping                   心跳测试
   quit                   退出客户端

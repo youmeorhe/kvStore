@@ -12,6 +12,8 @@ use anyhow::{anyhow, Result};
 pub struct KvStore {
     pub data: BTreeMap<String, String>,
     pub log_file: Mutex<File>,
+    /// 数据文件路径（clear 截断文件时需要重新打开句柄）
+    pub path: std::path::PathBuf,
 }
 
 /// 对外线程安全别名
@@ -77,6 +79,7 @@ impl KvStore {
         Ok(KvStore {
             data,
             log_file: Mutex::new(file),
+            path: path_obj.to_path_buf(),
         })
     }
 
@@ -139,6 +142,26 @@ impl KvStore {
     /// 空库判断
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// 清空所有数据（内存 + 日志文件），返回清掉的条数。
+    /// 幂等：空库调用返回 Ok(0)。
+    ///
+    /// 截断实现：另开一个 truncate(true) 的句柄把文件清零。
+    /// （Windows 下 append 句柄没有截断权限，set_len 会报"拒绝访问"，
+    ///   只能重新以 write+truncate 打开；append 句柄不受影响，
+    ///   append 模式的写永远落在当前文件末尾。）
+    pub fn clear(&mut self) -> Result<usize> {
+        let removed = self.data.len();
+        // 先截断磁盘，再清内存（与 set 的"先日志后内存"顺序一致）
+        let trunc = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&self.path)?;
+        trunc.sync_all()?;
+        drop(trunc);
+        self.data.clear();
+        Ok(removed)
     }
 }
 
@@ -244,6 +267,38 @@ mod tests {
         assert!(kv.set("".into(), "v".into()).is_err());
         assert!(kv.set("   ".into(), "v".into()).is_err());
         assert!(kv.del("").is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // 清空：内存 + 日志一起清，重启后仍是空库
+    #[test]
+    fn clear_then_restart_is_empty() {
+        let (dir, path) = unique_dir("clear");
+        {
+            let mut kv = KvStore::open(&path).unwrap();
+            kv.set("a".into(), "1".into()).unwrap();
+            kv.set("b".into(), "2".into()).unwrap();
+            kv.set("c".into(), "3".into()).unwrap();
+            assert_eq!(kv.clear().unwrap(), 3);      // 清掉 3 条
+            assert_eq!(kv.len(), 0);
+            assert!(kv.is_empty());
+            // clear 后继续写入正常工作
+            kv.set("d".into(), "4".into()).unwrap();
+        }
+        // 重启：只有 clear 之后写入的 d 在，a/b/c 不复活
+        let kv2 = KvStore::open(&path).unwrap();
+        assert_eq!(kv2.len(), 1);
+        assert_eq!(kv2.get("d").as_deref(), Some("4"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // 空库 clear 幂等，返回 0
+    #[test]
+    fn clear_empty_is_ok() {
+        let (dir, path) = unique_dir("clearempty");
+        let mut kv = KvStore::open(&path).unwrap();
+        assert_eq!(kv.clear().unwrap(), 0);
+        assert!(kv.is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 }

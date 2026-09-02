@@ -68,6 +68,12 @@ pub fn parse_command(line: &str) -> Result<(&str, Vec<&str>), String> {
             }
             Ok(("keys", vec![]))
         }
+        "clear" => {
+            if !args.is_empty() {
+                return Err("clear 命令不需要参数".to_string());
+            }
+            Ok(("clear", vec![]))
+        }
         "status" => {
             if !args.is_empty() {
                 return Err("status 命令不需要参数".to_string());
@@ -244,6 +250,18 @@ mod tests {
         assert_eq!(cmd, "keys");
         // 带参数
         let err = parse_command("keys a").unwrap_err();
+        assert!(err.contains("不需要参数"));
+    }
+    #[test]
+    fn test_parse_clear() {
+        let (cmd, args) = parse_command("clear").unwrap();
+        assert_eq!(cmd, "clear");
+        assert!(args.is_empty());
+        // 大小写
+        let (cmd, _) = parse_command("CLEAR").unwrap();
+        assert_eq!(cmd, "clear");
+        // 带参数
+        let err = parse_command("clear all").unwrap_err();
         assert!(err.contains("不需要参数"));
     }
     #[test]
